@@ -1,4 +1,4 @@
-// Package auth turns an auth profile plus the application's cert assets into
+// Package auth turns an auth profile plus the shared certificate files into
 // usable credentials: headers, query parameters, a username/password pair
 // and a TLS configuration.
 package auth
@@ -390,7 +390,7 @@ func fileCheck(dir, field, label, help string, required bool, file, pemType stri
 	}
 	b, err := os.ReadFile(filepath.Join(dir, file))
 	if err != nil {
-		c.Status, c.Detail = "missing", "upload "+file+" to this application's certs"
+		c.Status, c.Detail = "missing", "upload "+file+" under Global, certificate files"
 		return c
 	}
 	found := false

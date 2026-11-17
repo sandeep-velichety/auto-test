@@ -13,23 +13,23 @@ import (
 	"github.com/testplane/testplane/internal/model"
 )
 
-// A "team" application runs a flow across services, borrowing each
-// service's auth profile and environment values.
+// A "team" application runs a flow across services with the global auth
+// profiles and each service's environment values.
 func TestFlowAcrossApplications(t *testing.T) {
 	e, st := fixture(t) // application "shop" with profiles oauth, mtls, stale
 	shop, _ := st.GetApp("shop")
 	must(t, st.SaveApp(&model.Application{ID: "team", Name: "Team flows", DefaultEnvironment: "test",
 		Environments: map[string]map[string]string{"test": {"baseUrl": "http://127.0.0.1:1"}}}))
 	sc := &model.Scenario{ID: "flow", Name: "Flow", Tests: []model.Test{
-		{ID: "create", Name: "Create in shop", Type: model.TypeHTTP, Auth: "shop/oauth",
+		{ID: "create", Name: "Create in shop", Type: model.TypeHTTP, Auth: "oauth",
 			HTTP:    &model.HTTPStep{Method: "POST", URL: "{{shop.baseUrl}}/orders", Body: map[string]any{"item": "x", "quantity": 1}},
 			Capture: map[string]string{"id": "id"},
 			Variants: []model.Variant{
-				{ID: "stale", Name: "Stale", Auth: "shop/stale"},
+				{ID: "stale", Name: "Stale", Auth: "stale"},
 				{ID: "anon", Name: "Anonymous", Auth: "none"},
 			}},
-		{ID: "secure", Name: "mTLS with shop's certificate", Type: model.TypeHTTP, Auth: "shop/mtls", HTTP: &model.HTTPStep{URL: "{{shop.secureUrl}}/secure/ping"}},
-		{ID: "ghost-app", Name: "Unknown app", Type: model.TypeHTTP, Auth: "ghost/oauth", ContinueOnFail: true, HTTP: &model.HTTPStep{URL: "{{shop.baseUrl}}/health"}},
+		{ID: "secure", Name: "mTLS with shop's certificate", Type: model.TypeHTTP, Auth: "mtls", HTTP: &model.HTTPStep{URL: "{{shop.secureUrl}}/secure/ping"}},
+		{ID: "ghost-app", Name: "Unknown profile", Type: model.TypeHTTP, Auth: "ghost", ContinueOnFail: true, HTTP: &model.HTTPStep{URL: "{{shop.baseUrl}}/health"}},
 		{ID: "ghost-var", Name: "Unknown var", Type: model.TypeHTTP, Auth: "none", ContinueOnFail: true, HTTP: &model.HTTPStep{URL: "{{shop.nope}}/health"}},
 	}}
 	must(t, st.SaveScenario("team", sc))
@@ -42,9 +42,10 @@ func TestFlowAcrossApplications(t *testing.T) {
 			t.Errorf("%s: %s, want %s (%s)", id, got[id], w, find(t, res, id).Error)
 		}
 	}
-	// The borrowed profile's {{baseUrl}} must be shop's, not team's (which
-	// points at a closed port): the token request above proves it. The
-	// reverse also holds: team's own values are untouched.
+	// The shared profile fetches its token from {{shop.baseUrl}}, which is
+	// shop's address whichever application runs (team's own baseUrl points
+	// at a closed port): the token request above proves it. The reverse also
+	// holds: team's own values are untouched.
 	if u := find(t, res, "create").Request.(map[string]any)["url"]; u != shop.Environments["test"]["baseUrl"]+"/orders" {
 		t.Errorf("url %v", u)
 	}

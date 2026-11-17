@@ -104,17 +104,17 @@ func TestIDsCannotEscapeTheWorkspace(t *testing.T) {
 		if _, err := s.GetScenario("shop", id); !errors.Is(err, ErrInvalid) {
 			t.Errorf("scenario id %q accepted: %v", id, err)
 		}
-		if _, err := s.GetAuth("shop", id); !errors.Is(err, ErrInvalid) {
+		if _, err := s.GetAuth(id); !errors.Is(err, ErrInvalid) {
 			t.Errorf("auth id %q accepted: %v", id, err)
 		}
 	}
 	for _, name := range []string{"../../etc/passwd", "a/b.pem", "", ".."} {
-		if err := s.SaveAsset("shop", "certs", name, strings.NewReader("x")); !errors.Is(err, ErrInvalid) {
-			t.Errorf("asset name %q accepted: %v", name, err)
+		if err := s.SaveCert(name, strings.NewReader("x")); !errors.Is(err, ErrInvalid) {
+			t.Errorf("certificate file name %q accepted: %v", name, err)
 		}
-	}
-	if err := s.SaveAsset("shop", "auth", "x.pem", strings.NewReader("x")); !errors.Is(err, ErrInvalid) {
-		t.Error("auth is not an uploadable asset category")
+		if err := s.SaveProto("shop", name, strings.NewReader("x")); !errors.Is(err, ErrInvalid) {
+			t.Errorf("proto file name %q accepted: %v", name, err)
+		}
 	}
 	if _, err := s.GetScenario("shop", "nope"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("want ErrNotFound, got %v", err)
@@ -130,16 +130,21 @@ func TestAssetsDescribeCertificatesWithoutLeakingKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := certs.WriteClientFiles(s.AssetDir("shop", "certs")); err != nil {
+	if err := certs.WriteClientFiles(s.CertsDir()); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveAsset("shop", "protos", "orders.proto", strings.NewReader(`syntax = "proto3";`)); err != nil {
+	if err := s.SaveProto("shop", "orders.proto", strings.NewReader(`syntax = "proto3";`)); err != nil {
 		t.Fatal(err)
 	}
-	list, err := s.ListAssets("shop")
+	list, err := s.ListCerts()
 	if err != nil {
 		t.Fatal(err)
 	}
+	protos, err := s.ListProtos("shop")
+	if err != nil || len(protos) != 1 || len(list) != 3 {
+		t.Fatalf("want 3 global certificate files and 1 proto of the application, got %d and %d (%v)", len(list), len(protos), err)
+	}
+	list = append(list, protos...)
 	kinds := map[string]Asset{}
 	for _, a := range list {
 		kinds[a.Name] = a
@@ -156,14 +161,14 @@ func TestAssetsDescribeCertificatesWithoutLeakingKeys(t *testing.T) {
 	if kinds["orders.proto"].Kind != "proto" {
 		t.Errorf("proto: %+v", kinds["orders.proto"])
 	}
-	info, _ := os.Stat(filepath.Join(s.AssetDir("shop", "certs"), "demo-client.key"))
+	info, _ := os.Stat(filepath.Join(s.CertsDir(), "demo-client.key"))
 	if info.Mode().Perm() != 0o600 {
 		t.Errorf("key file mode %v", info.Mode().Perm())
 	}
-	if err := s.DeleteAsset("shop", "certs", "demo-ca.crt"); err != nil {
+	if err := s.DeleteCert("demo-ca.crt"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteAsset("shop", "certs", "demo-ca.crt"); !errors.Is(err, ErrNotFound) {
+	if err := s.DeleteCert("demo-ca.crt"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("second delete: %v", err)
 	}
 }
@@ -171,9 +176,13 @@ func TestAssetsDescribeCertificatesWithoutLeakingKeys(t *testing.T) {
 func TestExportLeavesPrivateKeysOutAndImportRestores(t *testing.T) {
 	s := newStore(t)
 	certs, _ := demo.NewCerts()
-	_ = certs.WriteClientFiles(s.AssetDir("shop", "certs"))
-	_ = s.SaveScenario("shop", scenario())
-	_ = s.SaveAuth("shop", &model.AuthProfile{ID: "token", Type: model.AuthBearer, Bearer: &model.BearerAuth{Token: "{{$env.TOKEN}}"}})
+	_ = certs.WriteClientFiles(s.CertsDir())
+	sc := scenario()
+	sc.Auth, sc.MTLS = "token", "client"
+	_ = s.SaveScenario("shop", sc)
+	_ = s.SaveAuth(&model.AuthProfile{ID: "token", Type: model.AuthBearer, Bearer: &model.BearerAuth{Token: "{{$env.TOKEN}}"}})
+	_ = s.SaveAuth(&model.AuthProfile{ID: "someone-elses", Type: model.AuthBearer, Bearer: &model.BearerAuth{Token: "x"}})
+	_ = s.SaveCertSet(&model.CertSet{ID: "client", Cert: "demo-client.crt", Key: "demo-client.key", CA: "demo-ca.crt"})
 
 	names := func(includeKeys bool) (map[string]bool, []byte) {
 		var buf bytes.Buffer
@@ -191,11 +200,14 @@ func TestExportLeavesPrivateKeysOutAndImportRestores(t *testing.T) {
 		return out, buf.Bytes()
 	}
 	without, data := names(false)
-	if without["shop/assets/certs/demo-client.key"] || !without["shop/assets/certs/demo-client.crt"] || !without["shop/scenarios/orders.yaml"] || !without["shop/assets/auth/token.yaml"] || !without["shop/application.yaml"] {
+	if without["shop/global/certs/demo-client.key"] || !without["shop/global/certs/demo-client.crt"] || !without["shop/scenarios/orders.yaml"] || !without["shop/global/auth/token.yaml"] || !without["shop/global/tls/client.yaml"] || !without["shop/application.yaml"] {
 		t.Fatalf("export without keys: %v", without)
 	}
+	if without["shop/global/auth/someone-elses.yaml"] {
+		t.Fatal("only the global auth this application uses travels with it")
+	}
 	with, _ := names(true)
-	if !with["shop/assets/certs/demo-client.key"] {
+	if !with["shop/global/certs/demo-client.key"] {
 		t.Fatal("export with keys should include the key")
 	}
 
@@ -207,8 +219,23 @@ func TestExportLeavesPrivateKeysOutAndImportRestores(t *testing.T) {
 	if _, err := other.GetScenario("shop", "orders"); err != nil {
 		t.Fatal(err)
 	}
-	if p, err := other.GetAuth("shop", "token"); err != nil || p.Bearer.Token != "{{$env.TOKEN}}" {
+	if p, err := other.GetAuth("token"); err != nil || p.Bearer.Token != "{{$env.TOKEN}}" {
 		t.Fatalf("auth after import: %+v %v", p, err)
+	}
+	if c, err := other.GetCertSet("client"); err != nil || c.Cert != "demo-client.crt" {
+		t.Fatalf("certificate set after import: %+v %v", c, err)
+	}
+	if _, err := os.Stat(filepath.Join(other.CertsDir(), "demo-client.crt")); err != nil {
+		t.Fatalf("certificate file after import: %v", err)
+	}
+	// Importing where a global profile of that id exists keeps the existing one.
+	mine := New(t.TempDir())
+	_ = mine.SaveAuth(&model.AuthProfile{ID: "token", Type: model.AuthBearer, Bearer: &model.BearerAuth{Token: "mine"}})
+	if _, err := mine.ImportApp(data); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := mine.GetAuth("token"); p.Bearer.Token != "mine" {
+		t.Fatalf("an import must not overwrite shared credentials: %+v", p)
 	}
 
 	var evil bytes.Buffer
@@ -307,8 +334,11 @@ func TestRunHistoryFiltersAndRetention(t *testing.T) {
 
 func TestExportReplacesLiteralSecrets(t *testing.T) {
 	s := newStore(t)
-	_ = s.SaveAuth("shop", &model.AuthProfile{ID: "literal", Type: model.AuthOAuth2ClientCredentials, OAuth2: &model.OAuth2Auth{TokenURL: "http://x/token", ClientID: "id", ClientSecret: "hunter2"}})
-	_ = s.SaveAuth("shop", &model.AuthProfile{ID: "byenv", Type: model.AuthBearer, Bearer: &model.BearerAuth{Token: "{{$env.TOKEN}}"}})
+	_ = s.SaveAuth(&model.AuthProfile{ID: "literal", Type: model.AuthOAuth2ClientCredentials, OAuth2: &model.OAuth2Auth{TokenURL: "http://x/token", ClientID: "id", ClientSecret: "hunter2"}})
+	_ = s.SaveAuth(&model.AuthProfile{ID: "byenv", Type: model.AuthBearer, Bearer: &model.BearerAuth{Token: "{{$env.TOKEN}}"}})
+	sc := scenario()
+	sc.Auth, sc.Tests[0].Auth = "literal", "byenv"
+	_ = s.SaveScenario("shop", sc)
 	var buf bytes.Buffer
 	if err := s.ExportApp("shop", &buf, false); err != nil {
 		t.Fatal(err)
@@ -324,18 +354,18 @@ func TestExportReplacesLiteralSecrets(t *testing.T) {
 		rc.Close()
 		content[f.Name] = string(b)
 	}
-	lit := content["shop/assets/auth/literal.yaml"]
+	lit := content["shop/global/auth/literal.yaml"]
 	if strings.Contains(lit, "hunter2") || !strings.Contains(lit, "CHANGE_ME") || !strings.Contains(lit, "clientId: id") {
 		t.Errorf("literal secret must be replaced:\n%s", lit)
 	}
-	if !strings.Contains(content["shop/assets/auth/byenv.yaml"], "{{$env.TOKEN}}") {
-		t.Errorf("an env reference is not a secret and must survive:\n%s", content["shop/assets/auth/byenv.yaml"])
+	if !strings.Contains(content["shop/global/auth/byenv.yaml"], "{{$env.TOKEN}}") {
+		t.Errorf("an env reference is not a secret and must survive:\n%s", content["shop/global/auth/byenv.yaml"])
 	}
 	buf.Reset()
 	_ = s.ExportApp("shop", &buf, true)
 	zr, _ = zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
 	for _, f := range zr.File {
-		if f.Name == "shop/assets/auth/literal.yaml" {
+		if f.Name == "shop/global/auth/literal.yaml" {
 			rc, _ := f.Open()
 			b, _ := io.ReadAll(rc)
 			rc.Close()

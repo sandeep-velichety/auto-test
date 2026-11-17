@@ -1,11 +1,27 @@
 export type Dict = Record<string, string>
 
+/** Shared by every application: the environment and region list, and values. */
+export interface Global {
+  environments?: string[]
+  regions?: string[]
+  defaultEnvironment?: string
+  /** Shared variables, keyed by environment, region or "environment/region". */
+  values?: Record<string, Dict>
+  /** What a run can target: environments, or environment/region pairs. */
+  keys: string[]
+}
+
+/** Which scenarios use each global auth profile and certificate set ("app/scenario"). */
+export interface Usage { auth: Record<string, string[]>; certSets: Record<string, string[]> }
+
 export interface Application {
   id: string
   name: string
   description?: string
   defaultEnvironment?: string
+  /** Id of a global auth profile. */
   defaultAuth?: string
+  /** This application's own values, keyed like Global.values. */
   environments?: Record<string, Dict>
 }
 
@@ -34,7 +50,7 @@ export interface AuthProfile {
   certChecks?: CertCheck[]
 }
 
-/** Named certificate files for mutual TLS; tests pick one. */
+/** Named certificate files for mutual TLS. Global: tests of any application pick one. */
 export interface CertSet extends TLSSettings {
   id: string; name: string; description?: string
   /** Hosts this set applies to automatically (host, host:port, *.domain). */

@@ -9,7 +9,7 @@ Contents: [What gets deployed](#what-gets-deployed) · [Build](#build) · [Confi
 | Piece | What it is |
 | --- | --- |
 | `testplane` binary | Runner, REST API and the web UI (embedded). Statically linked when built with `CGO_ENABLED=0`. |
-| Workspace folder | `applications/<id>/…` YAML, auth profiles, certificates. `.runs/` inside it holds run history as JSON. |
+| Workspace folder | `global/…` (auth profiles, certificates, the environment list, shared by every application) and `applications/<id>/…` YAML. `.runs/` inside it holds run history as JSON. |
 
 Two ways to use it, which can be combined:
 
@@ -273,7 +273,7 @@ Suggested `.gitignore` for a workspace repository:
 .runs/
 *.tmp
 # never commit private keys
-applications/*/assets/certs/*.key
+global/certs/*.key
 ```
 
 Flow that works well: testers edit in the UI on a shared instance, someone commits and opens a pull request, pipelines run what is on the main branch. Testplane does not commit or pull for you.
@@ -312,8 +312,9 @@ jobs:
       - run: cd tool && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/testplane" ./cmd/testplane
       - name: Client key for mTLS
         run: |
-          printf '%s' "$ORDERS_CLIENT_KEY" > applications/orders/assets/certs/client.key
-          chmod 600 applications/orders/assets/certs/client.key
+          mkdir -p global/certs
+          printf '%s' "$ORDERS_CLIENT_KEY" > global/certs/client.key
+          chmod 600 global/certs/client.key
         env:
           ORDERS_CLIENT_KEY: ${{ secrets.ORDERS_CLIENT_KEY }}
       - run: |
@@ -396,9 +397,9 @@ The application must exist on that backend. The tests still run on the build age
 ## Secrets and certificates
 
 - **Secrets:** write `{{$env.NAME}}` in an auth profile instead of the value, and provide `NAME` to the process (systemd `EnvironmentFile`, container env, Kubernetes Secret, CI secret). The value is resolved at run time and is not written back to disk. A missing variable fails the test with "undefined variable".
-- **Secrets typed straight into a profile** are stored as plain text in `assets/auth/<id>.yaml` (file mode `0600`). Fine for throwaway test credentials; avoid it for anything that matters.
-- **Certificates:** PEM files in `applications/<id>/assets/certs`, named by certificate sets in `assets/tls` (which can point at different files per environment). Private keys must be unencrypted PEM. The API lists what a file is (certificate, key, subject, expiry) and never returns its contents. Uploaded files are written with mode `0600`.
-- **Keys in pipelines:** keep the key out of Git and write it into `assets/certs/` from a CI secret before the run, as in the GitHub Actions example.
+- **Secrets typed straight into a profile** are stored as plain text in `global/auth/<id>.yaml` (file mode `0600`). Fine for throwaway test credentials; avoid it for anything that matters.
+- **Certificates:** PEM files in `global/certs`, shared by every application and named by certificate sets in `global/tls` (which can point at different files per environment and region). Private keys must be unencrypted PEM. The API lists what a file is (certificate, key, subject, expiry) and never returns its contents. Uploaded files are written with mode `0600`.
+- **Keys in pipelines:** keep the key out of Git and write it into `global/certs/` from a CI secret before the run, as in the GitHub Actions example.
 - **Expiry:** `testplane validate` fails when a referenced certificate is missing, expired, of the wrong kind or does not match its key. Running it on a schedule gives early warning.
 - **Run history** (`.runs/`) stores requests and responses of each test, truncated at 64 KB per body. Tokens added by auth profiles are not recorded and Datadog keys are masked; anything else you put in a step's own headers or body is stored.
 - **Datadog keys** for `logs` steps: provide `DD_API_KEY` and `DD_APP_KEY` to the backend process and reference them as `{{$env.DD_API_KEY}}` and `{{$env.DD_APP_KEY}}`. The application key needs permission to read logs.

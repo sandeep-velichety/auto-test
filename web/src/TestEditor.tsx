@@ -156,7 +156,7 @@ function StepFields({ type, step, set, protos, describe }: { type: TestType; ste
           </div>
           <Check label="Plaintext (no TLS)" value={s.plaintext} onChange={plaintext => set({ plaintext })} />
           <GrpcPicker step={s} set={set} describe={describe} />
-          <Field label="Proto files" wide hint={protos.length ? 'Comma separated file names from this application’s protos. Leave empty to use server reflection.' : 'Empty = server reflection. Upload .proto files under Auth & assets to use them here.'}>
+          <Field label="Proto files" wide hint={protos.length ? 'Comma separated file names from this application’s protos. Leave empty to use server reflection.' : 'Empty = server reflection. Upload .proto files under this application’s “Environments & settings” to use them here.'}>
             <Text mono value={(s.protoFiles || []).join(', ')} onChange={v => set({ protoFiles: v.split(',').map((p: string) => p.trim()).filter(Boolean) })} placeholder={protos.join(', ')} />
           </Field>
           <Field group label="Metadata" wide><KV value={s.metadata} onChange={metadata => set({ metadata })} keyLabel="key" addLabel="Add metadata" /></Field>
@@ -248,14 +248,14 @@ export function AuthSelect({ value, onChange, profiles, inherited }: { value: st
     <div>
       <Select value={value || ''} onChange={v => onChange(v || undefined)}
         options={[['', `inherit (${inherited || 'none'})`], ['none', 'none: send no credentials'], ...profiles.map(p => [p.id, `${p.name || p.id} · ${p.type}`] as [string, string])]} />
-      {unknown && <span className="hint error">Auth profile “{effective}” does not exist. Create it under Auth &amp; assets.</span>}
+      {unknown && <span className="hint error">Auth profile “{effective}” does not exist. Create it under Global.</span>}
       {checks.length > 0 && (
         <ul className="certlist">
           {checks.filter(c => c.required || c.status !== 'not_set').map(c => (
             <li key={c.field} className={c.status === 'ok' ? 'ok' : 'bad'}>
               <strong>{c.label}</strong>{' '}
               {c.status === 'ok' ? <>ready: <code>{c.file}</code></> : c.status === 'not_set' ? 'not chosen yet' : <>{c.status.replace('_', ' ')}{c.file ? <>: <code>{c.file}</code></> : null}</>}
-              {c.status !== 'ok' && <span className="hint">{c.help} Add it under Auth &amp; assets.</span>}
+              {c.status !== 'ok' && <span className="hint">{c.help} Add it under Global.</span>}
             </li>
           ))}
         </ul>
@@ -275,15 +275,15 @@ export function MtlsSelect({ value, onChange, sets, inherited }: { value: string
     <div>
       <Select value={value || ''} onChange={v => onChange(v || undefined)}
         options={[['', inherited ? `inherit (${label(inherited)})` : auto ? 'automatic: the set registered for the host, if any' : 'not needed'], ['none', 'never: present no certificate'], ...sets.map(c => [c.id, `${c.name || c.id}`] as [string, string])]} />
-      {unknown && <span className="hint error">Certificate set “{effective}” does not exist. Create it under Auth &amp; assets.</span>}
-      {sets.length === 0 && !effective && <span className="hint">No certificate sets yet. Add one under Auth &amp; assets to use mutual TLS.</span>}
+      {unknown && <span className="hint error">Certificate set “{effective}” does not exist. Create it under Global.</span>}
+      {sets.length === 0 && !effective && <span className="hint">No certificate sets yet. Add one under Global to use mutual TLS.</span>}
       {set?.checks && (
         <ul className="certlist">
           {set.checks.filter(c => c.required || c.status !== 'not_set').map(c => (
             <li key={c.field} className={c.status === 'ok' ? 'ok' : 'bad'}>
               <strong>{c.label}</strong>{' '}
               {c.status === 'ok' ? <>ready: <code>{c.file}</code></> : c.status === 'not_set' ? 'not chosen yet' : <>{c.status.replace('_', ' ')}{c.file ? <>: <code>{c.file}</code></> : null}</>}
-              {c.status !== 'ok' && <span className="hint">{c.help} Fix it under Auth &amp; assets.</span>}
+              {c.status !== 'ok' && <span className="hint">{c.help} Fix it under Global.</span>}
             </li>
           ))}
         </ul>

@@ -11,6 +11,7 @@ import (
 	"testing/fstest"
 
 	"github.com/testplane/testplane/internal/demo"
+	"github.com/testplane/testplane/internal/engine"
 	"github.com/testplane/testplane/internal/model"
 	"github.com/testplane/testplane/internal/store"
 )
@@ -77,7 +78,7 @@ func TestWorkspaceLifecycleOverHTTP(t *testing.T) {
 
 	// auth profiles and certificate requirements
 	oauth := model.AuthProfile{Type: model.AuthOAuth2ClientCredentials, OAuth2: &model.OAuth2Auth{TokenURL: "{{baseUrl}}/oauth/token", ClientID: demo.ClientID, ClientSecret: demo.ClientSecret}}
-	if code := c.do("PUT", "/api/apps/shop/auth/oauth", oauth, nil); code != 200 {
+	if code := c.do("PUT", "/api/global/auth/oauth", oauth, nil); code != 200 {
 		t.Fatalf("save oauth: %d", code)
 	}
 	var saved struct {
@@ -85,20 +86,20 @@ func TestWorkspaceLifecycleOverHTTP(t *testing.T) {
 		CertChecks []struct{ Field, Status string }
 	}
 	mtls := model.AuthProfile{Type: model.AuthMTLS, TLS: &model.TLSSettings{Cert: "c.crt", Key: "c.key"}}
-	if code := c.do("PUT", "/api/apps/shop/auth/mtls", mtls, &saved); code != 200 || len(saved.CertChecks) != 3 || saved.CertChecks[0].Status != "missing" {
+	if code := c.do("PUT", "/api/global/auth/mtls", mtls, &saved); code != 200 || len(saved.CertChecks) != 3 || saved.CertChecks[0].Status != "missing" {
 		t.Fatalf("save mtls: %d %+v", code, saved)
 	}
-	if code := c.do("PUT", "/api/apps/shop/auth/broken", model.AuthProfile{Type: model.AuthMTLS}, nil); code != 400 {
+	if code := c.do("PUT", "/api/global/auth/broken", model.AuthProfile{Type: model.AuthMTLS}, nil); code != 400 {
 		t.Fatalf("mtls without files: %d", code)
 	}
 	certs, _ := demo.NewCerts()
-	if code := c.do("PUT", "/api/apps/shop/assets/certs/c.crt", certs.ClientCert, nil); code != 204 {
+	if code := c.do("PUT", "/api/global/certs/c.crt", certs.ClientCert, nil); code != 204 {
 		t.Fatalf("upload cert: %d", code)
 	}
-	if code := c.do("PUT", "/api/apps/shop/assets/certs/c.key", certs.ClientKey, nil); code != 204 {
+	if code := c.do("PUT", "/api/global/certs/c.key", certs.ClientKey, nil); code != 204 {
 		t.Fatalf("upload key: %d", code)
 	}
-	if code := c.do("PUT", "/api/apps/shop/assets/certs/..%2Fescape", "x", nil); code != 400 {
+	if code := c.do("PUT", "/api/global/certs/..%2Fescape", "x", nil); code != 400 {
 		t.Fatalf("path escape in asset name: %d", code)
 	}
 	var check struct {
@@ -107,18 +108,18 @@ func TestWorkspaceLifecycleOverHTTP(t *testing.T) {
 		ClientCert bool
 		Sends      []string
 	}
-	if code := c.do("POST", "/api/apps/shop/auth/mtls/check", nil, &check); code != 200 || !check.OK || !check.ClientCert {
+	if code := c.do("POST", "/api/global/auth/mtls/check?app=shop", nil, &check); code != 200 || !check.OK || !check.ClientCert {
 		t.Fatalf("check mtls: %d %+v", code, check)
 	}
-	if code := c.do("POST", "/api/apps/shop/auth/oauth/check", nil, &check); code != 200 || !check.OK || len(check.Sends) != 1 {
+	if code := c.do("POST", "/api/global/auth/oauth/check?app=shop", nil, &check); code != 200 || !check.OK || len(check.Sends) != 1 {
 		t.Fatalf("check oauth: %d %+v", code, check)
 	}
 	var assets []store.Asset
-	if code := c.do("GET", "/api/apps/shop/assets", nil, &assets); code != 200 || len(assets) != 2 {
+	if code := c.do("GET", "/api/global/certs", nil, &assets); code != 200 || len(assets) != 2 {
 		t.Fatalf("assets: %d %+v", code, assets)
 	}
 	var raw []byte
-	c.do("GET", "/api/apps/shop/assets", nil, &raw)
+	c.do("GET", "/api/global/certs", nil, &raw)
 	if bytes.Contains(raw, []byte("PRIVATE KEY")) {
 		t.Fatal("asset listing must never contain key material")
 	}
@@ -204,5 +205,73 @@ func TestWorkspaceLifecycleOverHTTP(t *testing.T) {
 	}
 	if code := c.do("GET", "/api/nope", nil, nil); code != 404 {
 		t.Fatalf("unknown api path: %d", code)
+	}
+}
+
+// Environments, auth and certificates are global: one set of endpoints
+// serves every application.
+func TestGlobalSettingsUsageAndProtosOverHTTP(t *testing.T) {
+	st := store.New(t.TempDir())
+	srv := httptest.NewServer(New(st, nil).Handler())
+	defer srv.Close()
+	c := client{t, srv.URL}
+
+	var g struct {
+		model.Global
+		Keys []string `json:"keys"`
+	}
+	if code := c.do("GET", "/api/global", nil, &g); code != 200 || len(g.Keys) != 6 || g.Keys[0] != "stage/NA" {
+		t.Fatalf("a new workspace starts with the standard environments and regions: %d %+v", code, g)
+	}
+	if code := c.do("PUT", "/api/global", model.Global{Environments: []string{"stage"}, Regions: []string{"stage"}}, nil); code != 400 {
+		t.Fatalf("invalid list: %d", code)
+	}
+	next := model.Global{Environments: []string{"stage", "prod"}, Regions: []string{"NA", "AU", "EU"}, DefaultEnvironment: "stage/EU", Values: map[string]map[string]string{"stage/EU": {"idpUrl": "http://idp"}}}
+	if code := c.do("PUT", "/api/global", next, &g); code != 200 || len(g.Keys) != 6 || g.DefaultEnvironment != "stage/EU" {
+		t.Fatalf("save: %d %+v", code, g)
+	}
+
+	// Two applications use the same profile and certificate set.
+	for _, id := range []string{"orders", "billing"} {
+		if code := c.do("PUT", "/api/apps/"+id, model.Application{Name: id, DefaultAuth: "key"}, nil); code != 200 {
+			t.Fatalf("create %s: %d", id, code)
+		}
+	}
+	if code := c.do("PUT", "/api/global/auth/key", model.AuthProfile{Name: "Company key", Type: model.AuthHeaders, Headers: map[string]string{"X-Key": "k"},
+		Environments: map[string]map[string]any{"stage/EU": {"headers": map[string]any{"X-Key": "eu"}}}}, nil); code != 200 {
+		t.Fatalf("save global auth: %d", code)
+	}
+	if code := c.do("PUT", "/api/global/tls/client", model.CertSet{Name: "Client", CA: "ca.pem"}, nil); code != 200 {
+		t.Fatalf("save global certificate set: %d", code)
+	}
+	sc := model.Scenario{Name: "S", MTLS: "client", Tests: []model.Test{{ID: "t", Name: "T", Type: "http", Auth: "key", HTTP: &model.HTTPStep{URL: "http://x"}}}}
+	c.do("PUT", "/api/apps/orders/scenarios/one", sc, nil)
+	c.do("PUT", "/api/apps/billing/scenarios/two", sc, nil)
+	var usage store.Usage
+	if code := c.do("GET", "/api/global/usage", nil, &usage); code != 200 || len(usage.Auth["key"]) != 4 || len(usage.CertSets["client"]) != 2 {
+		t.Fatalf("usage: %d %+v", code, usage)
+	}
+	var check engine.AuthCheck
+	if code := c.do("POST", "/api/global/auth/key/check", nil, &check); code != 200 || !check.OK {
+		t.Fatalf("a global profile can be tried without an application: %d %+v", code, check)
+	}
+
+	// The per-application auth endpoints are gone; protos stay with the application.
+	var raw []byte
+	if code := c.do("GET", "/api/apps/orders/auth", nil, &raw); code != 404 {
+		t.Errorf("old endpoint: %d", code)
+	}
+	if code := c.do("PUT", "/api/apps/orders/protos/orders.proto", `syntax = "proto3";`, nil); code != 204 {
+		t.Fatalf("upload proto: %d", code)
+	}
+	var protos []store.Asset
+	if code := c.do("GET", "/api/apps/orders/protos", nil, &protos); code != 200 || len(protos) != 1 || protos[0].Kind != "proto" {
+		t.Fatalf("protos: %d %+v", code, protos)
+	}
+	if c.do("GET", "/api/apps/billing/protos", nil, &protos); len(protos) != 0 {
+		t.Errorf("protos belong to one application: %+v", protos)
+	}
+	if code := c.do("DELETE", "/api/apps/orders/protos/orders.proto", nil, nil); code != 204 {
+		t.Errorf("delete proto: %d", code)
 	}
 }

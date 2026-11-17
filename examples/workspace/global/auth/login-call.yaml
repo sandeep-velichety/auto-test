@@ -5,7 +5,7 @@ name: Token from a custom login call
 type: http_call
 httpCall:
   method: POST
-  url: "{{baseUrl}}/auth/login"
+  url: "{{sample-config.baseUrl}}/auth/login"
   headers:
     X-Client-Id: demo-client
   body:

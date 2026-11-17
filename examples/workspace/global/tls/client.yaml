@@ -1,11 +1,12 @@
-# A certificate set: the files this application presents for mutual TLS.
+# A certificate set: files to present for mutual TLS. It is global, so tests
+# of every application can use it.
 # File names refer to ../certs.
 id: client
 name: Client certificate
 # Used automatically for calls to these hosts (like client certificates in
 # Postman). Tests can also pick the set by name, or turn it off.
 hosts:
-  - "{{secureHost}}"
+  - "{{sample-config.secureHost}}"
 cert: demo-client.crt        # client certificate, PEM
 key: demo-client.key         # its private key, unencrypted PEM
 ca: demo-ca.crt              # CA that signed the SERVER's certificate (only for a private CA)

@@ -1,13 +1,39 @@
 # YAML reference
 
+A workspace has one `global/` folder, shared by every application, and one folder per application:
+
+| File | What it holds |
+| --- | --- |
+| `global/settings.yaml` | the environments and regions, and shared values |
+| `global/auth/<id>.yaml` | auth profiles |
+| `global/tls/<id>.yaml` | certificate sets |
+| `global/certs/<file>` | certificate and key files (PEM) |
+| `applications/<app>/application.yaml` | the application and its own values per environment |
+| `applications/<app>/scenarios/<id>.yaml` | scenarios |
+| `applications/<app>/assets/protos/<file>` | optional `.proto` files |
+
+## global/settings.yaml
+
+```yaml
+environments: [stage, qa, prod]
+regions: [NA, AU]                    # optional; with regions a run targets a pair such as stage/NA
+defaultEnvironment: stage/NA         # used by applications that name none
+values:                              # variables every application and auth profile can use
+  stage:    {idpUrl: "https://idp.stage.example.com"}      # every region of stage
+  AU:       {dataCentre: syd}                              # every environment in AU
+  prod/NA:  {idpUrl: "https://idp.na.example.com"}         # one exact pair
+```
+
+Keys under `values` (and under `environments` in an application, an auth profile or a certificate set) may be an environment (`stage`), a region (`AU`) or a pair (`stage/AU`). All that match the run are applied in that order, so the most specific wins.
+
 ## application.yaml
 
 ```yaml
 id: orders
 name: Orders service
 defaultEnvironment: staging
-defaultAuth: orders-oauth          # used by tests that do not pick a profile
-environments:
+defaultAuth: orders-oauth          # a global auth profile, used by tests that do not pick one
+environments:                      # this application's own values for the global environments
   staging:
     baseUrl: https://orders.staging.example.com
     grpcTarget: orders.staging.example.com:443
@@ -16,7 +42,7 @@ environments:
     postgresDsn: postgres://qa:{{$env.PG_PASSWORD}}@pg.staging:5432/orders?sslmode=require
 ```
 
-With regions, each environment key is an `environment/region` pair holding that pair's full set of values:
+`defaultEnvironment` is optional; without it the global default is used. Which environments exist is decided in `global/settings.yaml`, not here. With regions, a key is usually an `environment/region` pair holding the application's values for that pair:
 
 ```yaml
 defaultEnvironment: stage/NA
@@ -27,35 +53,38 @@ environments:
   prod/AU:  {baseUrl: "https://orders.au.example.com"}
 ```
 
-Run a pair with `--env stage --region AU` (or `--env stage/AU`). In tests, `{{$environment}}` and `{{$region}}` give the two names. In the `environments:` block of an auth profile or certificate set, a key may be an environment (`stage`), a region (`AU`) or a pair (`stage/AU`); all that match are applied in that order, so the most specific wins.
+Run a pair with `--env stage --region AU` (or `--env stage/AU`). In tests, `{{$environment}}` and `{{$region}}` give the two names. A value that is the same in every region can be written once under the environment name (`stage: {...}`).
 
 ## Variables
 
-`{{name}}` is replaced in every string of a test, an expectation and an auth profile. Lowest to highest precedence: environment, scenario `variables`, `--var` overrides, values captured by earlier steps. An undefined variable fails the test with a clear message.
+`{{name}}` is replaced in every string of a test, an expectation and an auth profile. Lowest to highest precedence: global shared values, the application's values for the environment, scenario `variables`, `--var` overrides, values captured by earlier steps. An undefined variable fails the test with a clear message.
 
-Values of other applications are available as `{{app-id.name}}`, taken from that application's environment with the same name as the one being run, or else its default environment.
+Every application's values are available as `{{app-id.name}}`, taken from that application's values for the environment being run, or else its default environment. A flow scenario uses this to call several services. A global auth profile uses it to point at one service whichever application's test is running, for example `tokenUrl: "{{orders.baseUrl}}/oauth/token"`.
 
 Built in: `{{$scenarioStart}}` (ISO time the scenario began), `{{$uuid}}`, `{{$timestamp}}`, `{{$timestampMs}}`, `{{$isoTimestamp}}`, `{{$randomInt}}`, `{{$env.NAME}}`. Built-ins produce a new value each time they appear; put one in a scenario variable to reuse the same value across steps.
 
-## Certificate sets (`assets/tls/<id>.yaml`)
+## Certificate sets (`global/tls/<id>.yaml`)
 
-A certificate set names the files to present for mutual TLS. Files are PEM and live in `assets/certs`.
+A certificate set names the files to present for mutual TLS. It is global: tests of every application use it by id. Files are PEM and live in `global/certs`.
 
 ```yaml
 id: client
 name: Orders client certificate
 hosts:                               # optional: present automatically on calls to these hosts
-  - "{{ordersHost}}"                 # host, host:port or *.example.com; variables allowed
+  - "{{orders.secureHost}}"          # host, host:port or *.example.com; variables allowed
   - "*.internal.example.com:8443"
 cert: client.crt                     # client certificate
 key: client.key                      # private key, unencrypted
 ca: internal-ca.pem                  # only when the service's certificate comes from a private CA
 serverName: orders.internal          # optional: when the certificate name differs from the host
 insecureSkipVerify: false
-environments:                        # only the fields that differ
-  staging:
-    cert: client-staging.crt
-    key: client-staging.key
+environments:                        # only the fields that differ, per environment, region or pair
+  stage:
+    cert: client-stage.crt
+    key: client-stage.key
+  prod/AU:
+    cert: client-prod-au.crt
+    key: client-prod-au.key
 ```
 
 A set with only `ca` trusts that CA and presents no client certificate.
@@ -63,12 +92,27 @@ A set with only `ca` trusts that CA and presents no client certificate.
 Which set a call uses, first match wins:
 
 1. `mtls` on the case, then on the test, then on the scenario. `mtls: none` presents nothing.
-2. Otherwise the application's set whose `hosts` match the host being called (HTTP and logs: the URL's host; gRPC: the target).
-3. Otherwise the TLS settings of the auth profile, if it has any (older style, below).
+2. Otherwise the TLS settings of the auth profile, if it has any (older style, below).
+3. Otherwise the set whose `hosts` match the host being called (HTTP and logs: the URL's host; gRPC: the target). Sets are global, so this applies to every application that calls that host.
 
-`mtls: other-app/client` borrows a set from another application.
+## Auth profiles (`global/auth/<id>.yaml`)
 
-## Auth profiles (`assets/auth/<id>.yaml`)
+Auth profiles are global: set one up once and tests of every application use it by id. A profile holds the values that are the same everywhere at the top, and what differs under `environments`, keyed by environment, region or pair:
+
+```yaml
+id: idp-client
+name: Identity provider client
+type: oauth2_client_credentials
+oauth2:
+  tokenUrl: "{{idpUrl}}/oauth2/token"      # idpUrl is a global shared value per environment
+  clientId: qa-tests
+  clientSecret: "{{$env.IDP_SECRET_STAGE}}"
+environments:
+  prod:                                    # every region of prod
+    oauth2: {clientSecret: "{{$env.IDP_SECRET_PROD}}"}
+  prod/AU:                                 # one exact pair
+    oauth2: {clientId: qa-tests-au}
+```
 
 Token from an identity provider (OAuth2). The token is fetched once per run:
 
@@ -173,8 +217,8 @@ tests: [...]
 | `id`, `name` | required; ids are lowercase letters, digits, `-`, `_` |
 | `type` | `http`, `grpc`, `kafka`, `mongo`, `postgres`, `logs` |
 | `kind` | `positive` (default) or `negative` |
-| `auth` | profile id, `other-app/profile-id` to borrow another application's profile, or `none`; default inherits |
-| `mtls` | certificate set id, `other-app/set-id`, or `none`; default inherits, then matches by host |
+| `auth` | id of a global auth profile, or `none`; default inherits from the scenario, then the application's `defaultAuth` |
+| `mtls` | id of a global certificate set, or `none`; default inherits, then matches by host |
 | `properties` | free-form labels |
 | `expect` | see below |
 | `capture` | `name: path`; also `$status` and `$header.Name` |
@@ -303,7 +347,7 @@ The result document is `{count, rows: [{column: value}]}`. Any statement can be 
 
 Uses Datadog's Logs Search API (`POST /api/v2/logs/events/search`), which needs both an API key and an application key. The result document is `{count, logs: [{id, timestamp, status, service, host, message, tags, attributes}]}`, oldest first. Keys can also come from an `api_key` auth profile whose header name is `DD-API-KEY`. Both keys are masked in stored run results.
 
-A borrowed profile's own placeholders are filled from its owner's environment: `orders/orders-oauth` with `tokenUrl: "{{baseUrl}}/oauth/token"` uses the `orders` application's `baseUrl`.
+A global auth profile's placeholders are filled from the global shared values and the values of the application whose test is running. To point a profile at one service whichever application uses it, write that application's value: `tokenUrl: "{{orders.baseUrl}}/oauth/token"`.
 
 ## expect
 

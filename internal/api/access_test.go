@@ -103,36 +103,36 @@ func TestSecretsAreWriteOnly(t *testing.T) {
 
 	profile := model.AuthProfile{Name: "OAuth", Type: model.AuthOAuth2ClientCredentials, OAuth2: &model.OAuth2Auth{TokenURL: "{{baseUrl}}/oauth/token", ClientID: demo.ClientID, ClientSecret: demo.ClientSecret}}
 	var saved model.AuthProfile
-	if code := c.do("PUT", "/api/apps/shop/auth/oauth", profile, &saved); code != 200 || saved.OAuth2.ClientSecret != model.SecretMask {
+	if code := c.do("PUT", "/api/global/auth/oauth", profile, &saved); code != 200 || saved.OAuth2.ClientSecret != model.SecretMask {
 		t.Fatalf("save response must be masked: %d %+v", code, saved.OAuth2)
 	}
 	var raw []byte
-	c.do("GET", "/api/apps/shop/auth", nil, &raw)
+	c.do("GET", "/api/global/auth", nil, &raw)
 	if bytes.Contains(raw, []byte(demo.ClientSecret)) || !bytes.Contains(raw, []byte(model.SecretMask)) {
 		t.Fatalf("listing leaks the secret: %s", raw)
 	}
 
 	// Saving the masked value back keeps the stored secret, and it still works.
 	saved.Name = "OAuth renamed"
-	if code := c.do("PUT", "/api/apps/shop/auth/oauth", saved, nil); code != 200 {
+	if code := c.do("PUT", "/api/global/auth/oauth", saved, nil); code != 200 {
 		t.Fatalf("resave: %d", code)
 	}
-	stored, _ := st.GetAuth("shop", "oauth")
+	stored, _ := st.GetAuth("oauth")
 	if stored.OAuth2.ClientSecret != demo.ClientSecret || stored.Name != "OAuth renamed" {
 		t.Fatalf("stored after resave: %+v", stored.OAuth2)
 	}
 	var check struct{ OK bool }
-	if c.do("POST", "/api/apps/shop/auth/oauth/check", nil, &check); !check.OK {
+	if c.do("POST", "/api/global/auth/oauth/check?app=shop", nil, &check); !check.OK {
 		t.Fatal("profile must still fetch a token after a masked resave")
 	}
 
 	// A new value replaces it; an env reference is shown as written.
 	saved.OAuth2.ClientSecret = "{{$env.ORDERS_SECRET}}"
-	c.do("PUT", "/api/apps/shop/auth/oauth", saved, &saved)
+	c.do("PUT", "/api/global/auth/oauth", saved, &saved)
 	if saved.OAuth2.ClientSecret != "{{$env.ORDERS_SECRET}}" {
 		t.Fatalf("env reference should not be masked: %q", saved.OAuth2.ClientSecret)
 	}
-	if stored, _ = st.GetAuth("shop", "oauth"); stored.OAuth2.ClientSecret != "{{$env.ORDERS_SECRET}}" {
+	if stored, _ = st.GetAuth("oauth"); stored.OAuth2.ClientSecret != "{{$env.ORDERS_SECRET}}" {
 		t.Fatalf("replacement not stored: %q", stored.OAuth2.ClientSecret)
 	}
 
@@ -143,21 +143,25 @@ func TestSecretsAreWriteOnly(t *testing.T) {
 		"key":    {Type: model.AuthAPIKey, APIKey: &model.APIKeyAuth{Name: "X-Key", Value: "key-secret"}},
 		"pw":     {Type: model.AuthOAuth2Password, OAuth2: &model.OAuth2Auth{TokenURL: "http://x", ClientID: "c", ClientSecret: "cs-secret", Username: "u", Password: "up-secret"}},
 	} {
-		c.do("PUT", "/api/apps/shop/auth/"+id, p, &raw)
+		c.do("PUT", "/api/global/auth/"+id, p, &raw)
 		if bytes.Contains(raw, []byte("-secret")) {
 			t.Errorf("%s: save response leaks: %s", id, raw)
 		}
 	}
-	c.do("GET", "/api/apps/shop/auth", nil, &raw)
+	c.do("GET", "/api/global/auth", nil, &raw)
 	if bytes.Contains(raw, []byte("-secret")) || !bytes.Contains(raw, []byte(`"username":"u"`)) {
 		t.Errorf("listing leaks or hides too much: %s", raw)
 	}
 	// A masked value for a profile that never had a secret stores nothing.
-	c.do("PUT", "/api/apps/shop/auth/fresh", model.AuthProfile{Type: model.AuthBasic, Basic: &model.BasicAuth{Username: "u", Password: model.SecretMask}}, nil)
-	if p, _ := st.GetAuth("shop", "fresh"); p.Basic.Password != "" {
+	c.do("PUT", "/api/global/auth/fresh", model.AuthProfile{Type: model.AuthBasic, Basic: &model.BasicAuth{Username: "u", Password: model.SecretMask}}, nil)
+	if p, _ := st.GetAuth("fresh"); p.Basic.Password != "" {
 		t.Errorf("mask must never be stored as a password: %q", p.Basic.Password)
 	}
 	// The export has neither keys nor literal secrets, whatever is asked.
+	// It carries the global profiles the application uses.
+	shop, _ := st.GetApp("shop")
+	shop.DefaultAuth = "basic"
+	_ = st.SaveApp(shop)
 	c.do("GET", "/api/apps/shop/export?keys=true", nil, &raw)
 	if len(raw) == 0 {
 		t.Fatal("export failed")
@@ -166,7 +170,7 @@ func TestSecretsAreWriteOnly(t *testing.T) {
 	if _, err := other.ImportApp(raw); err != nil {
 		t.Fatal(err)
 	}
-	if p, _ := other.GetAuth("shop", "basic"); p.Basic.Password != "CHANGE_ME" {
+	if p, _ := other.GetAuth("basic"); p.Basic.Password != "CHANGE_ME" {
 		t.Errorf("exported password: %q", p.Basic.Password)
 	}
 }
@@ -245,7 +249,7 @@ func TestCertificateSetsOverHTTP(t *testing.T) {
 	st := store.New(t.TempDir())
 	_ = st.SaveApp(&model.Application{ID: "shop", Name: "Shop", DefaultEnvironment: "dev", Environments: map[string]map[string]string{"dev": {}, "staging": {}}})
 	certs, _ := demo.NewCerts()
-	_ = certs.WriteClientFiles(st.AssetDir("shop", "certs"))
+	_ = certs.WriteClientFiles(st.CertsDir())
 	srv := httptest.NewServer(New(st, nil).Handler())
 	defer srv.Close()
 	c := client{t, srv.URL}
@@ -258,14 +262,14 @@ func TestCertificateSetsOverHTTP(t *testing.T) {
 	set := model.CertSet{Name: "Client", Cert: "demo-client.crt", Key: "demo-client.key", CA: "demo-ca.crt",
 		Environments: map[string]model.TLSSettings{"staging": {Cert: "staging.crt", Key: "staging.key"}}}
 	var saved view
-	if code := c.do("PUT", "/api/apps/shop/tls/client", set, &saved); code != 200 || len(saved.Checks) != 3 || saved.Checks[0].Status != "ok" {
+	if code := c.do("PUT", "/api/global/tls/client", set, &saved); code != 200 || len(saved.Checks) != 3 || saved.Checks[0].Status != "ok" {
 		t.Fatalf("save: %d %+v", code, saved)
 	}
 	var list []view
-	if c.do("GET", "/api/apps/shop/tls", nil, &list); len(list) != 1 || list[0].Checks[0].Status != "ok" || list[0].Checks[0].File != "demo-client.crt" {
+	if c.do("GET", "/api/global/tls", nil, &list); len(list) != 1 || list[0].Checks[0].Status != "ok" || list[0].Checks[0].File != "demo-client.crt" {
 		t.Fatalf("default environment: %+v", list)
 	}
-	if c.do("GET", "/api/apps/shop/tls?env=staging", nil, &list); list[0].Checks[0].Status != "missing" || list[0].Checks[0].File != "staging.crt" || list[0].Checks[2].Status != "ok" {
+	if c.do("GET", "/api/global/tls?env=staging", nil, &list); list[0].Checks[0].Status != "missing" || list[0].Checks[0].File != "staging.crt" || list[0].Checks[2].Status != "ok" {
 		t.Fatalf("staging should report its own missing files and the shared CA: %+v", list)
 	}
 	for name, bad := range map[string]model.CertSet{
@@ -273,11 +277,11 @@ func TestCertificateSetsOverHTTP(t *testing.T) {
 		"cert without key": {Cert: "demo-client.crt"},
 		"path":             {Cert: "../x.crt", Key: "x.key"},
 	} {
-		if code := c.do("PUT", "/api/apps/shop/tls/bad", bad, nil); code != 400 {
+		if code := c.do("PUT", "/api/global/tls/bad", bad, nil); code != 400 {
 			t.Errorf("%s: %d, want 400", name, code)
 		}
 	}
-	if code := c.do("PUT", "/api/apps/shop/tls/Bad%20Id", set, nil); code != 400 {
+	if code := c.do("PUT", "/api/global/tls/Bad%20Id", set, nil); code != 400 {
 		t.Errorf("bad id: %d", code)
 	}
 
@@ -296,13 +300,13 @@ func TestCertificateSetsOverHTTP(t *testing.T) {
 	if _, err := other.ImportApp(raw); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := other.GetCertSet("shop", "client"); err != nil || got.Environments["staging"].Cert != "staging.crt" {
+	if got, err := other.GetCertSet("client"); err != nil || got.Environments["staging"].Cert != "staging.crt" {
 		t.Errorf("certificate set after import: %+v %v", got, err)
 	}
-	if code := c.do("DELETE", "/api/apps/shop/tls/client", nil, nil); code != 204 {
+	if code := c.do("DELETE", "/api/global/tls/client", nil, nil); code != 204 {
 		t.Errorf("delete: %d", code)
 	}
-	if code := c.do("DELETE", "/api/apps/shop/tls/client", nil, nil); code != 404 {
+	if code := c.do("DELETE", "/api/global/tls/client", nil, nil); code != 404 {
 		t.Errorf("second delete: %d", code)
 	}
 }

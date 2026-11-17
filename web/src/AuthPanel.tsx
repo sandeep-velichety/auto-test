@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { api, slug, uniqueId } from './api'
-import type { Application, Asset, AuthCheckResult, AuthProfile, CertSet, TLSSettings } from './types'
+import type { Application, Asset, AuthCheckResult, AuthProfile, CertSet, TLSSettings, Usage } from './types'
 import { Badge, Check, Field, FileButton, JsonField, KV, Notice, Select, Text, useAction } from './widgets'
 
 const TYPES: [string, string][] = [
@@ -35,7 +35,7 @@ const CERT_ROWS = [
   { field: 'ca', label: 'CA bundle', kind: 'certificate', help: 'PEM certificate(s) of the CA that signed the service’s own certificate. Only needed when that CA is private.' },
 ] as const
 
-/** Tabs for "all environments" and each environment that can differ. */
+/** Tabs for "all environments" and each environment (or environment/region pair) that can differ. */
 function EnvTabs({ envs, tab, onTab, overridden }: { envs: string[]; tab: string; onTab: (t: string) => void; overridden: (env: string) => boolean }) {
   if (envs.length === 0) return null
   return (
@@ -43,7 +43,7 @@ function EnvTabs({ envs, tab, onTab, overridden }: { envs: string[]; tab: string
       <button type="button" role="tab" aria-selected={tab === ''} className={tab === '' ? 'on' : ''} onClick={() => onTab('')}>All environments</button>
       {envs.map(e => (
         <button type="button" role="tab" aria-selected={tab === e} key={e} className={tab === e ? 'on' : ''} onClick={() => onTab(e)}>
-          {e}{overridden(e) ? ' •' : ''}
+          {e.replace('/', ' · ')}{overridden(e) ? ' •' : ''}
         </button>
       ))}
     </div>
@@ -103,15 +103,25 @@ function cleanTLS(t: TLSSettings): TLSSettings {
   return out
 }
 
-function CertSetEditor({ app, initial, isNew, assets, envs, takenIds, onSaved, onDeleted, onUpload }: {
-  app: Application; initial: CertSet; isNew: boolean; assets: Asset[]; envs: string[]; takenIds: string[]
+/** Environments an item can differ in: the global list, plus any it already has values for. */
+function tabsFor(envs: string[], item: { environments?: Record<string, unknown> }): string[] {
+  return [...envs, ...Object.keys(item.environments || {}).filter(k => !envs.includes(k))]
+}
+
+function usedBy(list: string[] | undefined): string {
+  if (!list?.length) return 'Nothing uses it yet.'
+  return `Used by ${list.length} place${list.length === 1 ? '' : 's'}: ${list.slice(0, 8).join(', ')}${list.length > 8 ? ', …' : ''}.`
+}
+
+function CertSetEditor({ initial, isNew, assets, envs, takenIds, used, onSaved, onDeleted, onUpload }: {
+  initial: CertSet; isNew: boolean; assets: Asset[]; envs: string[]; takenIds: string[]; used?: string[]
   onSaved: (c: CertSet) => void; onDeleted: () => void; onUpload: (f: File) => Promise<void>
 }) {
   const [c, setC] = useState<CertSet>(initial)
   const [tab, setTab] = useState('')
   const [dirty, setDirty] = useState(isNew)
   const act = useAction()
-  const certs = assets.filter(a => a.category === 'certs')
+  const certs = assets
   const base: TLSSettings = { cert: c.cert, key: c.key, ca: c.ca, serverName: c.serverName, insecureSkipVerify: c.insecureSkipVerify }
   const override = tab ? c.environments?.[tab] || {} : undefined
   const change = (patch: Partial<TLSSettings>) => {
@@ -125,15 +135,15 @@ function CertSetEditor({ app, initial, isNew, assets, envs, takenIds, onSaved, o
   const save = () => act.run(async () => {
     if (isNew && !slug(c.name)) throw new Error('Give the certificate set a name first.')
     const id = isNew ? uniqueId(slug(c.name), takenIds) : c.id
-    const saved = await api.saveCertSet(app.id, { id, name: c.name, description: c.description, hosts: c.hosts?.length ? c.hosts : undefined, ...cleanTLS(base), environments: c.environments })
+    const saved = await api.saveCertSet({ id, name: c.name, description: c.description, hosts: c.hosts?.length ? c.hosts : undefined, ...cleanTLS(base), environments: c.environments })
     setC(saved); setDirty(false); onSaved(saved)
   })
   return (
     <div className="card">
       <div className="editor-bar">
-        <div><h3>{isNew ? 'New certificate set' : c.name || c.id}</h3>{!isNew && <span className="muted mono">assets/tls/{c.id}.yaml</span>}</div>
+        <div><h3>{isNew ? 'New certificate set' : c.name || c.id}</h3>{!isNew && <span className="muted mono">global/tls/{c.id}.yaml · use in tests as “{c.id}”</span>}</div>
         <div className="row">
-          {!isNew && <button type="button" className="link danger" onClick={() => { if (confirm(`Delete certificate set “${c.name || c.id}”? Tests that use it will fail until they are changed. The files stay.`)) act.run(async () => { await api.deleteCertSet(app.id, c.id); onDeleted() }) }}>Delete</button>}
+          {!isNew && <button type="button" className="link danger" onClick={() => { if (confirm(`Delete certificate set “${c.name || c.id}” for every application? ${usedBy(used)} Tests that use it will fail until they are changed. The files stay.`)) act.run(async () => { await api.deleteCertSet(c.id); onDeleted() }) }}>Delete</button>}
           <button type="button" className="primary" onClick={save} disabled={act.busy || !dirty}>{dirty ? 'Save' : 'Saved'}</button>
         </div>
       </div>
@@ -142,11 +152,11 @@ function CertSetEditor({ app, initial, isNew, assets, envs, takenIds, onSaved, o
         <Field label="Name" wide><Text value={c.name} onChange={name => { setC({ ...c, name }); setDirty(true) }} placeholder="Orders client certificate" /></Field>
       </div>
       <Field label="Description" wide><Text value={c.description} onChange={description => { setC({ ...c, description: description || undefined }); setDirty(true) }} /></Field>
-      <Field label="Use automatically for these hosts" wide hint="Comma separated, like client certificates in Postman: host, host:port or *.example.com. Variables such as {{ordersHost}} work, so the host can differ per environment. Leave empty to use this set only where a test picks it.">
+      <Field label="Use automatically for these hosts" wide hint="Comma separated, like client certificates in Postman: host, host:port or *.example.com. Variables work, so the host can differ per environment: a shared value such as {{gatewayHost}}, or an application’s value as {{orders.secureHost}}. Leave empty to use this set only where a test picks it.">
         <Text mono value={(c.hosts || []).join(', ')} onChange={v => { setC({ ...c, hosts: v.split(',').map(h => h.trim()).filter(Boolean) }); setDirty(true) }} placeholder="orders.staging.example.com, *.internal.example.com:8443" />
       </Field>
-      <p className="hint">A certificate set is what a call presents when mutual TLS is needed. It is used automatically for the hosts above, or wherever a test picks it under “Mutual TLS”. Files live in this application’s <code>assets/certs</code> folder.</p>
-      <EnvTabs envs={envs} tab={tab} onTab={setTab} overridden={e => !!c.environments?.[e]} />
+      <p className="hint">A certificate set is what a call presents when mutual TLS is needed. It is global: any application’s call to the hosts above uses it automatically, and any test can pick it under “Mutual TLS”. It can name different files for each environment below. {!isNew && usedBy(used)}</p>
+      <EnvTabs envs={tabsFor(envs, c)} tab={tab} onTab={setTab} overridden={e => !!c.environments?.[e]} />
       {tab && (
         <p className="hint">
           Only what differs in <strong>{tab}</strong>. Anything left as “same as all environments” uses the shared value.{' '}
@@ -160,8 +170,8 @@ function CertSetEditor({ app, initial, isNew, assets, envs, takenIds, onSaved, o
   )
 }
 
-function ProfileEditor({ app, initial, isNew, assets, sets, envs, env, takenIds, onSaved, onDeleted, onUpload }: {
-  app: Application; initial: AuthProfile; isNew: boolean; assets: Asset[]; sets: CertSet[]; envs: string[]; env: string; takenIds: string[]
+function ProfileEditor({ apps, initial, isNew, assets, sets, envs, env, takenIds, used, onSaved, onDeleted, onUpload }: {
+  apps: Application[]; initial: AuthProfile; isNew: boolean; assets: Asset[]; sets: CertSet[]; envs: string[]; env: string; takenIds: string[]; used?: string[]
   onSaved: (p: AuthProfile) => void; onDeleted: () => void; onUpload: (f: File) => Promise<void>
 }) {
   const [stored, setStored] = useState<AuthProfile>(initial)
@@ -169,6 +179,7 @@ function ProfileEditor({ app, initial, isNew, assets, sets, envs, env, takenIds,
   const [dirty, setDirty] = useState(isNew)
   const [check, setCheck] = useState<AuthCheckResult | null>(null)
   const [tryWith, setTryWith] = useState('')
+  const [tryApp, setTryApp] = useState('')
   const [preset, setPreset] = useState('')
   const act = useAction()
 
@@ -199,7 +210,7 @@ function ProfileEditor({ app, initial, isNew, assets, sets, envs, env, takenIds,
   const setH = (patch: any) => set({ httpCall: { ...h, ...patch } })
   const hasOwnTLS = p.type === 'mtls' || !!p.tls
   const tls = p.tls || {}
-  const certs = assets.filter(a => a.category === 'certs')
+  const certs = assets
   const types: [string, string][] = p.type === 'mtls' ? [...TYPES, ['mtls', 'Mutual TLS only (older style; prefer a certificate set)']] : TYPES
 
   const body = (): AuthProfile => {
@@ -229,22 +240,22 @@ function ProfileEditor({ app, initial, isNew, assets, sets, envs, env, takenIds,
     let ok = false
     await act.run(async () => {
       if (isNew && !slug(stored.name)) throw new Error('Give the profile a name first.')
-      const saved = await api.saveAuth(app.id, body())
+      const saved = await api.saveAuth(body())
       setStored(saved); setDirty(false); onSaved(saved); ok = true
     })
     return ok
   }
   const test = async () => {
     if (dirty && !(await save())) return
-    await act.run(async () => setCheck(await api.checkAuth(app.id, stored.id || body().id, tab || env, tryWith)))
+    await act.run(async () => setCheck(await api.checkAuth(stored.id || body().id, tab || env, tryWith, tryApp)))
   }
 
   return (
     <div className="card">
       <div className="editor-bar">
-        <div><h3>{isNew ? 'New auth profile' : stored.name || stored.id}</h3>{!isNew && <span className="muted mono">assets/auth/{stored.id}.yaml</span>}</div>
+        <div><h3>{isNew ? 'New auth profile' : stored.name || stored.id}</h3>{!isNew && <span className="muted mono">global/auth/{stored.id}.yaml · use in tests as “{stored.id}”</span>}</div>
         <div className="row">
-          {!isNew && <button type="button" className="link danger" onClick={() => { if (confirm(`Delete auth profile “${stored.name || stored.id}”? Tests that use it will fail until they are changed.`)) act.run(async () => { await api.deleteAuth(app.id, stored.id); onDeleted() }) }}>Delete</button>}
+          {!isNew && <button type="button" className="link danger" onClick={() => { if (confirm(`Delete auth profile “${stored.name || stored.id}” for every application? ${usedBy(used)} Tests that use it will fail until they are changed.`)) act.run(async () => { await api.deleteAuth(stored.id); onDeleted() }) }}>Delete</button>}
           <button type="button" className="primary" onClick={save} disabled={act.busy || !dirty}>{dirty ? 'Save' : 'Saved'}</button>
         </div>
       </div>
@@ -255,20 +266,21 @@ function ProfileEditor({ app, initial, isNew, assets, sets, envs, env, takenIds,
       </div>
       <Field label="Description" wide><Text value={stored.description} onChange={description => { setStored({ ...stored, description: description || undefined }); setDirty(true) }} /></Field>
 
-      <EnvTabs envs={envs} tab={tab} onTab={t => { setTab(t); setCheck(null) }} overridden={e => !!stored.environments?.[e]} />
+      <p className="hint">This profile is global: every application’s tests can use it. Set the values that are the same everywhere under “All environments”, then open an environment to enter what differs there (a different client id, secret or token address). {!isNew && usedBy(used)}</p>
+      <EnvTabs envs={tabsFor(envs, stored)} tab={tab} onTab={t => { setTab(t); setCheck(null) }} overridden={e => !!stored.environments?.[e]} />
       {tab && (
         <p className="hint">
-          Showing how this profile reads in <strong>{tab}</strong>. Anything you change here applies to {tab} only.{' '}
+          Showing how this profile reads in <strong>{tab.replace('/', ' · ')}</strong>. Anything you change here applies to {tab.replace('/', ' · ')} only.{' '}
           {stored.environments?.[tab] && <button type="button" className="link" onClick={resetEnv}>Reset {tab} to the shared values</button>}
         </p>
       )}
 
       <div key={tab + (stored.environments?.[tab] ? '1' : '0') + preset}>
-        <Field label="How this application authenticates" wide>
+        <Field label="How to authenticate" wide>
           <Select value={p.type} onChange={type => set({ type })} options={types} />
         </Field>
         {mark('type')}
-        <p className="hint">Values can use variables such as <code>{'{{baseUrl}}'}</code>. Keep secrets out of the file with <code>{'{{$env.MY_SECRET}}'}</code>, which reads an environment variable of the backend. A secret saved here can be used and replaced but not read back: it shows as ********.</p>
+        <p className="hint">Values can use variables: a global shared value such as <code>{'{{idpUrl}}'}</code>, or one application’s value as <code>{'{{application-id.baseUrl}}'}</code>. Keep secrets out of the file with <code>{'{{$env.MY_SECRET}}'}</code>, which reads an environment variable of the backend. A secret saved here can be used and replaced but not read back: it shows as ********.</p>
 
         {p.type === 'basic' && (
           <div className="grid">
@@ -321,7 +333,7 @@ function ProfileEditor({ app, initial, isNew, assets, sets, envs, env, takenIds,
             <p className="hint">Describe the request that returns a token. The backend makes this call before the first test that needs it, reads the token from the response and sends it on every request. {mark('httpCall')}</p>
             <div className="grid">
               <Field label="Method"><Select value={h.method || 'POST'} onChange={method => setH({ method })} options={['POST', 'GET', 'PUT']} /></Field>
-              <Field label="URL" wide><Text mono value={h.url} onChange={url => setH({ url })} placeholder="{{baseUrl}}/auth/login" /></Field>
+              <Field label="URL" wide><Text mono value={h.url} onChange={url => setH({ url })} placeholder="{{idpUrl}}/auth/login" /></Field>
             </div>
             <Field group label="Request headers" wide><KV value={h.headers} onChange={headers => setH({ headers })} keyLabel="header" addLabel="Add header" /></Field>
             <Field group label="Query parameters" wide><KV value={h.query} onChange={query => setH({ query })} addLabel="Add parameter" /></Field>
@@ -354,8 +366,9 @@ function ProfileEditor({ app, initial, isNew, assets, sets, envs, env, takenIds,
 
       <div className="tryit">
         <div className="row">
-          <strong>Try it in {tab || env || 'the default environment'}</strong>
+          <strong>Try it in {(tab || env || 'the default environment').replace('/', ' · ')}</strong>
           <label className="inline">with certificate set <Select value={tryWith} onChange={setTryWith} options={[['', 'none'], ...sets.map(s => [s.id, s.name || s.id] as [string, string])]} /></label>
+          <label className="inline">as application <Select value={tryApp} onChange={setTryApp} options={[['', 'any (shared values only)'], ...apps.map(a => [a.id, a.name || a.id] as [string, string])]} /></label>
           <button type="button" onClick={test} disabled={act.busy}>{act.busy ? 'Working…' : dirty ? 'Save and try' : 'Try it'}</button>
         </div>
         {check && (check.ok
@@ -368,75 +381,78 @@ function ProfileEditor({ app, initial, isNew, assets, sets, envs, env, takenIds,
 
 type Selection = { kind: 'profile' | 'set'; id: string } | { kind: 'new-profile' | 'new-set' } | null
 
-export function AuthPanel({ app, profiles, sets, assets, env, reload }: { app: Application; profiles: AuthProfile[]; sets: CertSet[]; assets: Asset[]; env: string; reload: () => Promise<void> }) {
+/** Global auth profiles, certificate sets and certificate files: one place, used by every application. */
+export function AuthPanel({ apps, profiles, sets, assets, envs, env, usage, reload }: {
+  apps: Application[]; profiles: AuthProfile[]; sets: CertSet[]; assets: Asset[]; envs: string[]; env: string; usage: Usage; reload: () => Promise<void>
+}) {
   const [sel, setSel] = useState<Selection>(profiles[0] ? { kind: 'profile', id: profiles[0].id } : sets[0] ? { kind: 'set', id: sets[0].id } : null)
   const act = useAction()
-  const envs = Object.keys(app.environments || {})
-  const upload = (category: string) => async (f: File) => {
-    await act.run(async () => { await api.uploadAsset(app.id, category, f.name, await f.arrayBuffer()); await reload() })
+  const upload = async (f: File) => {
+    await act.run(async () => { await api.uploadCert(f.name, await f.arrayBuffer()); await reload() })
   }
   const profile = sel && sel.kind === 'profile' ? profiles.find(p => p.id === sel.id) : undefined
   const certSet = sel && sel.kind === 'set' ? sets.find(c => c.id === sel.id) : undefined
   const issues = (checks: AuthProfile['certChecks']) => (checks || []).filter(c => c.status !== 'ok' && (c.required || c.status !== 'not_set')).length
-  const flag = (invalid: boolean, n: number) => invalid ? <Badge kind="st-failed">invalid file</Badge> : n ? <Badge kind="st-failed">{n} cert issue{n === 1 ? '' : 's'} in {env || 'default'}</Badge> : null
+  const flag = (invalid: boolean, n: number) => invalid ? <Badge kind="st-failed">invalid file</Badge> : n ? <Badge kind="st-failed">{n} cert issue{n === 1 ? '' : 's'} in {(env || 'default').replace('/', ' · ')}</Badge> : null
   const on = (kind: string, id: string) => (sel && 'id' in sel && sel.kind === kind && sel.id === id ? ' on' : '')
+  const uses = (list: string[] | undefined) => (list?.length ? ` · used in ${list.length} place${list.length === 1 ? '' : 's'}` : ' · not used yet')
+  const differs = (e?: Record<string, unknown>) => (e && Object.keys(e).length ? ` · differs in ${Object.keys(e).map(k => k.replace('/', ' · ')).join(', ')}` : '')
 
   return (
     <div className="split">
       <div className="list">
-        <div className="list-head"><h3>Certificate sets (mutual TLS)</h3><button type="button" onClick={() => setSel({ kind: 'new-set' })}>+ New</button></div>
-        {sets.length === 0 && <p className="muted">None yet. A certificate set names the client certificate, key and CA this application uses; tests then choose it under “Mutual TLS”.</p>}
-        {sets.map(c => (
-          <button type="button" key={c.id} className={'list-item' + on('set', c.id)} onClick={() => setSel({ kind: 'set', id: c.id })}>
-            <span className="result-name">{c.name || c.id}</span>
-            <span className="muted">{c.hosts?.length ? `for ${c.hosts.join(', ')}` : [c.cert, c.ca].filter(Boolean).join(' · ') || 'no files chosen'}{c.environments ? ` · differs in ${Object.keys(c.environments).join(', ')}` : ''}</span>
-            {flag(!!c.description?.startsWith('INVALID: '), issues(c.checks))}
-          </button>
-        ))}
-
         <div className="list-head"><h3>Auth profiles</h3><button type="button" onClick={() => setSel({ kind: 'new-profile' })}>+ New</button></div>
-        {profiles.length === 0 && <p className="muted">None yet. An auth profile is how a test gets its token, key or headers.</p>}
+        {profiles.length === 0 && <p className="muted">None yet. An auth profile is how a test gets its token, key or headers. Create it once here and every application can use it.</p>}
         {profiles.map(p => (
           <button type="button" key={p.id} className={'list-item' + on('profile', p.id)} onClick={() => setSel({ kind: 'profile', id: p.id })}>
             <span className="result-name">{p.name || p.id}</span>
-            <span className="muted">{p.type}{app.defaultAuth === p.id ? ' · default' : ''}{p.environments ? ` · differs in ${Object.keys(p.environments).join(', ')}` : ''}</span>
+            <span className="muted">{p.type}{differs(p.environments)}{uses(usage.auth[p.id])}</span>
             {flag(!!p.description?.startsWith('INVALID: '), issues(p.certChecks))}
           </button>
         ))}
 
+        <div className="list-head"><h3>Certificate sets (mutual TLS)</h3><button type="button" onClick={() => setSel({ kind: 'new-set' })}>+ New</button></div>
+        {sets.length === 0 && <p className="muted">None yet. A certificate set names a client certificate, key and CA; tests of any application then choose it under “Mutual TLS”.</p>}
+        {sets.map(c => (
+          <button type="button" key={c.id} className={'list-item' + on('set', c.id)} onClick={() => setSel({ kind: 'set', id: c.id })}>
+            <span className="result-name">{c.name || c.id}</span>
+            <span className="muted">{c.hosts?.length ? `for ${c.hosts.join(', ')}` : [c.cert, c.ca].filter(Boolean).join(' · ') || 'no files chosen'}{differs(c.environments)}{uses(usage.certSets[c.id])}</span>
+            {flag(!!c.description?.startsWith('INVALID: '), issues(c.checks))}
+          </button>
+        ))}
+
         <div className="list-head"><h3>Certificate and key files</h3></div>
-        <p className="hint">Stored with this application under <code>assets/</code>. Key contents are never shown.</p>
+        <p className="hint">Stored once on this backend under <code>global/certs</code> and named by certificate sets. Key contents are never shown.</p>
         <div className="row">
-          <FileButton label="Upload certificate or key" accept=".pem,.crt,.cer,.key" onFile={upload('certs')} />
-          <FileButton label="Upload .proto" accept=".proto" onFile={upload('protos')} />
+          <FileButton label="Upload certificate or key" accept=".pem,.crt,.cer,.key" onFile={upload} />
         </div>
         {act.error && <Notice kind="error" onClose={() => act.setError('')}>{act.error}</Notice>}
         {assets.map(a => (
-          <div className="asset" key={a.category + a.name}>
+          <div className="asset" key={a.name}>
             <div>
               <span className="mono">{a.name}</span> <Badge kind="neutral">{a.kind}</Badge> {a.expired && <Badge kind="st-failed">expired</Badge>}
               {a.subject && <span className="hint">{a.subject}{a.isCA ? ' (CA)' : ''} · until {a.notAfter?.slice(0, 10)}</span>}
             </div>
-            <button type="button" className="icon" title={`Delete ${a.name}`} onClick={() => { if (confirm(`Delete ${a.name}? Anything that uses it will stop working.`)) act.run(async () => { await api.deleteAsset(app.id, a.category, a.name); await reload() }) }}>×</button>
+            <button type="button" className="icon" title={`Delete ${a.name}`} onClick={() => { if (confirm(`Delete ${a.name} for every application? Anything that uses it will stop working.`)) act.run(async () => { await api.deleteCert(a.name); await reload() }) }}>×</button>
           </div>
         ))}
         {assets.length === 0 && <p className="muted">Nothing uploaded yet.</p>}
       </div>
 
       <div className="detail">
-        {sel?.kind === 'new-set' && <CertSetEditor key="new-set" app={app} isNew initial={{ id: '', name: '' }} assets={assets} envs={envs} takenIds={sets.map(c => c.id)}
-          onUpload={upload('certs')} onDeleted={() => setSel(null)} onSaved={async c => { await reload(); setSel({ kind: 'set', id: c.id }) }} />}
+        {sel?.kind === 'new-set' && <CertSetEditor key="new-set" isNew initial={{ id: '', name: '' }} assets={assets} envs={envs} takenIds={sets.map(c => c.id)}
+          onUpload={upload} onDeleted={() => setSel(null)} onSaved={async c => { await reload(); setSel({ kind: 'set', id: c.id }) }} />}
         {certSet && (certSet.description?.startsWith('INVALID: ')
-          ? <Notice kind="error">assets/tls/{certSet.id}.yaml does not parse: {certSet.description.slice(9)}</Notice>
-          : <CertSetEditor key={'set-' + certSet.id} app={app} isNew={false} initial={certSet} assets={assets} envs={envs} takenIds={[]}
-              onUpload={upload('certs')} onSaved={() => reload()} onDeleted={async () => { await reload(); setSel(null) }} />)}
-        {sel?.kind === 'new-profile' && <ProfileEditor key="new-profile" app={app} isNew initial={{ id: '', name: '', type: 'oauth2_client_credentials' }} assets={assets} sets={sets} envs={envs} env={env} takenIds={profiles.map(p => p.id)}
-          onUpload={upload('certs')} onDeleted={() => setSel(null)} onSaved={async p => { await reload(); setSel({ kind: 'profile', id: p.id }) }} />}
+          ? <Notice kind="error">global/tls/{certSet.id}.yaml does not parse: {certSet.description.slice(9)}</Notice>
+          : <CertSetEditor key={'set-' + certSet.id} isNew={false} initial={certSet} assets={assets} envs={envs} takenIds={[]} used={usage.certSets[certSet.id]}
+              onUpload={upload} onSaved={() => reload()} onDeleted={async () => { await reload(); setSel(null) }} />)}
+        {sel?.kind === 'new-profile' && <ProfileEditor key="new-profile" apps={apps} isNew initial={{ id: '', name: '', type: 'oauth2_client_credentials' }} assets={assets} sets={sets} envs={envs} env={env} takenIds={profiles.map(p => p.id)}
+          onUpload={upload} onDeleted={() => setSel(null)} onSaved={async p => { await reload(); setSel({ kind: 'profile', id: p.id }) }} />}
         {profile && (profile.description?.startsWith('INVALID: ')
-          ? <Notice kind="error">assets/auth/{profile.id}.yaml does not parse: {profile.description.slice(9)}</Notice>
-          : <ProfileEditor key={'profile-' + profile.id} app={app} isNew={false} initial={profile} assets={assets} sets={sets} envs={envs} env={env} takenIds={[]}
-              onUpload={upload('certs')} onSaved={() => reload()} onDeleted={async () => { await reload(); setSel(null) }} />)}
-        {!sel && <p className="muted">Select a certificate set or an auth profile, or create one.</p>}
+          ? <Notice kind="error">global/auth/{profile.id}.yaml does not parse: {profile.description.slice(9)}</Notice>
+          : <ProfileEditor key={'profile-' + profile.id} apps={apps} isNew={false} initial={profile} assets={assets} sets={sets} envs={envs} env={env} takenIds={[]} used={usage.auth[profile.id]}
+              onUpload={upload} onSaved={() => reload()} onDeleted={async () => { await reload(); setSel(null) }} />)}
+        {!sel && <p className="muted">Select an auth profile or a certificate set, or create one.</p>}
       </div>
     </div>
   )

@@ -34,11 +34,11 @@ func TestHeadersAndMetadataOverMutualTLS(t *testing.T) {
 	st := store.New(t.TempDir())
 	must(t, st.SaveApp(&model.Application{ID: "shop", Name: "Shop", DefaultEnvironment: "t", DefaultAuth: "cert",
 		Environments: map[string]map[string]string{"t": {"secureUrl": web.URL, "grpcTarget": "localhost:" + port, "tenant": "acme"}}}))
-	must(t, certs.WriteClientFiles(st.AssetDir("shop", "certs")))
+	must(t, certs.WriteClientFiles(st.CertsDir()))
 	tlsFiles := &model.TLSSettings{Cert: "demo-client.crt", Key: "demo-client.key", CA: "demo-ca.crt"}
-	must(t, st.SaveAuth("shop", &model.AuthProfile{ID: "cert", Type: model.AuthMTLS, TLS: tlsFiles}))
-	must(t, st.SaveAuth("shop", &model.AuthProfile{ID: "key-and-cert", Type: model.AuthAPIKey, APIKey: &model.APIKeyAuth{Name: "X-Api-Key", Value: "k-1"}, TLS: tlsFiles}))
-	must(t, st.SaveAuth("shop", &model.AuthProfile{ID: "trust-only", Type: model.AuthNone, TLS: &model.TLSSettings{CA: "demo-ca.crt"}}))
+	must(t, st.SaveAuth(&model.AuthProfile{ID: "cert", Type: model.AuthMTLS, TLS: tlsFiles}))
+	must(t, st.SaveAuth(&model.AuthProfile{ID: "key-and-cert", Type: model.AuthAPIKey, APIKey: &model.APIKeyAuth{Name: "X-Api-Key", Value: "k-1"}, TLS: tlsFiles}))
+	must(t, st.SaveAuth(&model.AuthProfile{ID: "trust-only", Type: model.AuthNone, TLS: &model.TLSSettings{CA: "demo-ca.crt"}}))
 
 	health := func() *model.GRPCStep {
 		return &model.GRPCStep{Target: "{{grpcTarget}}", Method: "grpc.health.v1.Health/Check", Metadata: map[string]string{"x-tenant": "{{tenant}}"}, Message: map[string]any{"service": "orders"}}

@@ -1,17 +1,20 @@
 // Package store reads and writes a workspace on disk.
 //
+//	<workspace>/global/settings.yaml                      environments, regions, shared values
+//	<workspace>/global/auth/<profile>.yaml                auth profiles, for every application
+//	<workspace>/global/tls/<certificate set>.yaml         certificate sets, for every application
+//	<workspace>/global/certs/<file>                       certificate and key files
 //	<workspace>/applications/<app>/application.yaml
-//	<workspace>/applications/<app>/assets/auth/<profile>.yaml
-//	<workspace>/applications/<app>/assets/tls/<certificate set>.yaml
-//	<workspace>/applications/<app>/assets/certs/<file>
 //	<workspace>/applications/<app>/assets/protos/<file>
 //	<workspace>/applications/<app>/scenarios/<scenario>.yaml
 //	<workspace>/.runs/<app>/<run>.json
+//
+// Older workspaces kept auth, certificate sets and certificate files inside
+// each application (assets/auth, assets/tls, assets/certs). Migrate moves
+// them to global/.
 package store
 
 import (
-	"archive/zip"
-	"bytes"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -33,8 +36,6 @@ import (
 var ErrNotFound = errors.New("not found")
 var ErrInvalid = errors.New("invalid")
 
-var AssetCategories = []string{"certs", "protos"}
-
 type Store struct{ Root string }
 
 func New(root string) *Store { return &Store{Root: root} }
@@ -43,10 +44,17 @@ func invalid(f string, a ...any) error { return fmt.Errorf("%w: %s", ErrInvalid,
 
 func (s *Store) AppDir(app string) string { return filepath.Join(s.Root, "applications", app) }
 
-// AssetDir returns the directory holding one asset category of an app.
-func (s *Store) AssetDir(app, category string) string {
-	return filepath.Join(s.AppDir(app), "assets", category)
+// ProtosDir holds an application's .proto files.
+func (s *Store) ProtosDir(app string) string {
+	return filepath.Join(s.AppDir(app), "assets", "protos")
 }
+
+// GlobalDir holds what every application shares.
+func (s *Store) GlobalDir() string { return filepath.Join(s.Root, "global") }
+
+// CertsDir holds the certificate and key files named by certificate sets
+// and auth profiles.
+func (s *Store) CertsDir() string { return filepath.Join(s.GlobalDir(), "certs") }
 
 func readYAML(path string, v any) error {
 	b, err := os.ReadFile(path)
@@ -106,6 +114,81 @@ func listIDs(dir, ext string) ([]string, error) {
 	return ids, nil
 }
 
+// ---- global settings ----
+
+func (s *Store) globalPath() string { return filepath.Join(s.GlobalDir(), "settings.yaml") }
+
+// GetGlobal returns the shared environment and region list. A workspace
+// without the file gets the list its applications already use, or the
+// standard one when there is nothing to go by.
+func (s *Store) GetGlobal() (*model.Global, error) {
+	var g model.Global
+	err := readYAML(s.globalPath(), &g)
+	if err == nil {
+		return &g, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+	apps, err := s.ListApps()
+	if err != nil {
+		return nil, err
+	}
+	return globalFromApps(apps), nil
+}
+
+// globalFromApps derives the list from the keys applications use.
+func globalFromApps(apps []model.Application) *model.Global {
+	g := &model.Global{}
+	envs, regions := map[string]bool{}, map[string]bool{}
+	for _, a := range apps {
+		for key := range a.Environments {
+			name, region, paired := strings.Cut(key, "/")
+			envs[name] = true
+			if paired && region != "" {
+				regions[region] = true
+			}
+		}
+	}
+	if len(envs) == 0 {
+		return model.DefaultGlobal()
+	}
+	// A name used both ways (a region somewhere, an environment elsewhere)
+	// stays a region.
+	for r := range regions {
+		delete(envs, r)
+	}
+	g.Environments, g.Regions = sortedKeys(envs), sortedKeys(regions)
+	if len(g.Environments) == 0 {
+		return model.DefaultGlobal()
+	}
+	for _, a := range apps {
+		if g.Has(a.DefaultEnvironment) {
+			g.DefaultEnvironment = a.DefaultEnvironment
+			break
+		}
+	}
+	if g.DefaultEnvironment == "" {
+		g.DefaultEnvironment = g.Keys()[0]
+	}
+	return g
+}
+
+func (s *Store) SaveGlobal(g *model.Global) error {
+	if errs := g.Validate(); len(errs) > 0 {
+		return invalid("%s", strings.Join(errs, "; "))
+	}
+	if g.DefaultEnvironment == "" {
+		g.DefaultEnvironment = g.Keys()[0]
+	}
+	for key, vals := range g.Values {
+		if len(vals) == 0 {
+			delete(g.Values, key)
+		}
+	}
+	return writeYAML(s.globalPath(), g)
+}
+
 // ---- applications ----
 
 func (s *Store) ListApps() ([]model.Application, error) {
@@ -146,7 +229,7 @@ func (s *Store) SaveApp(a *model.Application) error {
 	if a.Name == "" {
 		a.Name = a.ID
 	}
-	for _, d := range []string{"scenarios", "assets/auth", "assets/tls", "assets/certs", "assets/protos"} {
+	for _, d := range []string{"scenarios", "assets/protos"} {
 		if err := os.MkdirAll(filepath.Join(s.AppDir(a.ID), d), 0o755); err != nil {
 			return err
 		}
@@ -268,26 +351,23 @@ func (s *Store) DeleteScenario(app, id string) error {
 	}
 }
 
-// ---- auth profiles ----
+// ---- auth profiles (global) ----
 
-func (s *Store) authPath(app, id string) (string, error) {
-	if !model.ValidID(app) || !model.ValidID(id) {
-		return "", invalid("id %q/%q", app, id)
+func (s *Store) authPath(id string) (string, error) {
+	if !model.ValidID(id) {
+		return "", invalid("auth profile id %q", id)
 	}
-	return filepath.Join(s.AssetDir(app, "auth"), id+".yaml"), nil
+	return filepath.Join(s.GlobalDir(), "auth", id+".yaml"), nil
 }
 
-func (s *Store) ListAuth(app string) ([]model.AuthProfile, error) {
-	if _, err := s.GetApp(app); err != nil {
-		return nil, err
-	}
-	ids, err := listIDs(s.AssetDir(app, "auth"), ".yaml")
+func (s *Store) ListAuth() ([]model.AuthProfile, error) {
+	ids, err := listIDs(filepath.Join(s.GlobalDir(), "auth"), ".yaml")
 	if err != nil {
 		return nil, err
 	}
 	out := []model.AuthProfile{}
 	for _, id := range ids {
-		a, err := s.GetAuth(app, id)
+		a, err := s.GetAuth(id)
 		if err != nil {
 			out = append(out, model.AuthProfile{ID: id, Name: id, Description: "INVALID: " + err.Error()})
 			continue
@@ -297,8 +377,8 @@ func (s *Store) ListAuth(app string) ([]model.AuthProfile, error) {
 	return out, nil
 }
 
-func (s *Store) GetAuth(app, id string) (*model.AuthProfile, error) {
-	p, err := s.authPath(app, id)
+func (s *Store) GetAuth(id string) (*model.AuthProfile, error) {
+	p, err := s.authPath(id)
 	if err != nil {
 		return nil, err
 	}
@@ -310,17 +390,14 @@ func (s *Store) GetAuth(app, id string) (*model.AuthProfile, error) {
 	return &a, nil
 }
 
-func (s *Store) SaveAuth(app string, a *model.AuthProfile) error {
-	if _, err := s.GetApp(app); err != nil {
-		return err
-	}
+func (s *Store) SaveAuth(a *model.AuthProfile) error {
 	if errs := a.Validate(); len(errs) > 0 {
 		return invalid("%s", strings.Join(errs, "; "))
 	}
 	if a.Name == "" {
 		a.Name = a.ID
 	}
-	p, err := s.authPath(app, a.ID)
+	p, err := s.authPath(a.ID)
 	if err != nil {
 		return err
 	}
@@ -332,8 +409,8 @@ func (s *Store) SaveAuth(app string, a *model.AuthProfile) error {
 	return writeFile(p, b, 0o600)
 }
 
-func (s *Store) DeleteAuth(app, id string) error {
-	p, err := s.authPath(app, id)
+func (s *Store) DeleteAuth(id string) error {
+	p, err := s.authPath(id)
 	if err != nil {
 		return err
 	}
@@ -344,26 +421,23 @@ func (s *Store) DeleteAuth(app, id string) error {
 	}
 }
 
-// ---- certificate sets ----
+// ---- certificate sets (global) ----
 
-func (s *Store) tlsPath(app, id string) (string, error) {
-	if !model.ValidID(app) || !model.ValidID(id) {
-		return "", invalid("id %q/%q", app, id)
+func (s *Store) tlsPath(id string) (string, error) {
+	if !model.ValidID(id) {
+		return "", invalid("certificate set id %q", id)
 	}
-	return filepath.Join(s.AssetDir(app, "tls"), id+".yaml"), nil
+	return filepath.Join(s.GlobalDir(), "tls", id+".yaml"), nil
 }
 
-func (s *Store) ListCertSets(app string) ([]model.CertSet, error) {
-	if _, err := s.GetApp(app); err != nil {
-		return nil, err
-	}
-	ids, err := listIDs(s.AssetDir(app, "tls"), ".yaml")
+func (s *Store) ListCertSets() ([]model.CertSet, error) {
+	ids, err := listIDs(filepath.Join(s.GlobalDir(), "tls"), ".yaml")
 	if err != nil {
 		return nil, err
 	}
 	out := []model.CertSet{}
 	for _, id := range ids {
-		c, err := s.GetCertSet(app, id)
+		c, err := s.GetCertSet(id)
 		if err != nil {
 			out = append(out, model.CertSet{ID: id, Name: id, Description: "INVALID: " + err.Error()})
 			continue
@@ -373,8 +447,8 @@ func (s *Store) ListCertSets(app string) ([]model.CertSet, error) {
 	return out, nil
 }
 
-func (s *Store) GetCertSet(app, id string) (*model.CertSet, error) {
-	p, err := s.tlsPath(app, id)
+func (s *Store) GetCertSet(id string) (*model.CertSet, error) {
+	p, err := s.tlsPath(id)
 	if err != nil {
 		return nil, err
 	}
@@ -386,25 +460,22 @@ func (s *Store) GetCertSet(app, id string) (*model.CertSet, error) {
 	return &c, nil
 }
 
-func (s *Store) SaveCertSet(app string, c *model.CertSet) error {
-	if _, err := s.GetApp(app); err != nil {
-		return err
-	}
+func (s *Store) SaveCertSet(c *model.CertSet) error {
 	if errs := c.Validate(); len(errs) > 0 {
 		return invalid("%s", strings.Join(errs, "; "))
 	}
 	if c.Name == "" {
 		c.Name = c.ID
 	}
-	p, err := s.tlsPath(app, c.ID)
+	p, err := s.tlsPath(c.ID)
 	if err != nil {
 		return err
 	}
 	return writeYAML(p, c)
 }
 
-func (s *Store) DeleteCertSet(app, id string) error {
-	p, err := s.tlsPath(app, id)
+func (s *Store) DeleteCertSet(id string) error {
+	p, err := s.tlsPath(id)
 	if err != nil {
 		return err
 	}
@@ -415,10 +486,79 @@ func (s *Store) DeleteCertSet(app, id string) error {
 	}
 }
 
-// ---- asset files (certs, protos) ----
+// ---- usage ----
+
+// Usage says which scenarios refer to each auth profile and certificate
+// set, as "application/scenario". Because these are shared, it is what a
+// change or a delete will touch.
+type Usage struct {
+	Auth     map[string][]string `json:"auth"`
+	CertSets map[string][]string `json:"certSets"`
+}
+
+func (s *Store) Usage() (*Usage, error) {
+	apps, err := s.ListApps()
+	if err != nil {
+		return nil, err
+	}
+	u := &Usage{Auth: map[string][]string{}, CertSets: map[string][]string{}}
+	add := func(m map[string][]string, id, where string) {
+		if id == "" || id == model.AuthNone {
+			return
+		}
+		for _, w := range m[id] {
+			if w == where {
+				return
+			}
+		}
+		m[id] = append(m[id], where)
+	}
+	for _, a := range apps {
+		add(u.Auth, a.DefaultAuth, a.ID+" (default)")
+		list, err := s.ListScenarios(a.ID)
+		if err != nil {
+			continue
+		}
+		for _, sc := range list {
+			where := a.ID + "/" + sc.ID
+			auths, sets := scenarioRefs(&sc)
+			for _, id := range auths {
+				add(u.Auth, id, where)
+			}
+			for _, id := range sets {
+				add(u.CertSets, id, where)
+			}
+		}
+	}
+	return u, nil
+}
+
+// scenarioRefs lists the auth profile and certificate set ids a scenario
+// names anywhere, without "none" and without duplicates.
+func scenarioRefs(sc *model.Scenario) (auths, sets []string) {
+	a, m := map[string]bool{}, map[string]bool{}
+	note := func(into map[string]bool, id string) {
+		if id != "" && id != model.AuthNone {
+			into[id] = true
+		}
+	}
+	note(a, sc.Auth)
+	note(m, sc.MTLS)
+	for _, t := range sc.Tests {
+		note(a, t.Auth)
+		note(m, t.MTLS)
+		for _, v := range t.Variants {
+			note(a, v.Auth)
+			note(m, v.MTLS)
+		}
+	}
+	return sortedKeys(a), sortedKeys(m)
+}
+
+// ---- files: certificates (global) and protos (per application) ----
 
 type Asset struct {
-	Category string    `json:"category"`
+	Category string    `json:"category"` // certs | protos
 	Name     string    `json:"name"`
 	Size     int64     `json:"size"`
 	Modified time.Time `json:"modified"`
@@ -430,49 +570,82 @@ type Asset struct {
 	IsCA     bool      `json:"isCA,omitempty"`
 }
 
-func validCategory(c string) bool {
-	for _, x := range AssetCategories {
-		if x == c {
-			return true
+func listFiles(dir, category string) ([]Asset, error) {
+	out := []Asset{}
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return out, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		if e.IsDir() || !model.ValidFileName(e.Name()) {
+			continue
 		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		a := Asset{Category: category, Name: e.Name(), Size: info.Size(), Modified: info.ModTime()}
+		describe(&a, filepath.Join(dir, e.Name()))
+		out = append(out, a)
 	}
-	return false
+	return out, nil
 }
 
-func (s *Store) assetPath(app, category, name string) (string, error) {
-	if !model.ValidID(app) || !validCategory(category) || !model.ValidFileName(name) {
-		return "", invalid("asset %s/%s", category, name)
+func saveFile(dir, name string, r io.Reader) error {
+	if !model.ValidFileName(name) {
+		return invalid("file name %q", name)
 	}
-	return filepath.Join(s.AssetDir(app, category), name), nil
+	b, err := io.ReadAll(io.LimitReader(r, 10<<20))
+	if err != nil {
+		return err
+	}
+	if len(b) == 0 {
+		return invalid("file is empty")
+	}
+	return writeFile(filepath.Join(dir, name), b, 0o600)
 }
 
-func (s *Store) ListAssets(app string) ([]Asset, error) {
+func deleteFile(dir, name string) error {
+	if !model.ValidFileName(name) {
+		return invalid("file name %q", name)
+	}
+	if err := os.Remove(filepath.Join(dir, name)); errors.Is(err, fs.ErrNotExist) {
+		return ErrNotFound
+	} else {
+		return err
+	}
+}
+
+// ListCerts lists the shared certificate and key files.
+func (s *Store) ListCerts() ([]Asset, error) { return listFiles(s.CertsDir(), "certs") }
+
+func (s *Store) SaveCert(name string, r io.Reader) error { return saveFile(s.CertsDir(), name, r) }
+
+func (s *Store) DeleteCert(name string) error { return deleteFile(s.CertsDir(), name) }
+
+// ListProtos lists an application's .proto files.
+func (s *Store) ListProtos(app string) ([]Asset, error) {
 	if _, err := s.GetApp(app); err != nil {
 		return nil, err
 	}
-	out := []Asset{}
-	for _, cat := range AssetCategories {
-		entries, err := os.ReadDir(s.AssetDir(app, cat))
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		for _, e := range entries {
-			if e.IsDir() || !model.ValidFileName(e.Name()) {
-				continue
-			}
-			info, err := e.Info()
-			if err != nil {
-				continue
-			}
-			a := Asset{Category: cat, Name: e.Name(), Size: info.Size(), Modified: info.ModTime()}
-			describe(&a, filepath.Join(s.AssetDir(app, cat), e.Name()))
-			out = append(out, a)
-		}
+	return listFiles(s.ProtosDir(app), "protos")
+}
+
+func (s *Store) SaveProto(app, name string, r io.Reader) error {
+	if _, err := s.GetApp(app); err != nil {
+		return err
 	}
-	return out, nil
+	return saveFile(s.ProtosDir(app), name, r)
+}
+
+func (s *Store) DeleteProto(app, name string) error {
+	if !model.ValidID(app) {
+		return invalid("application id %q", app)
+	}
+	return deleteFile(s.ProtosDir(app), name)
 }
 
 // describe fills in what a file is without ever exposing key material.
@@ -510,36 +683,6 @@ func describe(a *Asset, path string) {
 			}
 			return
 		}
-	}
-}
-
-func (s *Store) SaveAsset(app, category, name string, r io.Reader) error {
-	if _, err := s.GetApp(app); err != nil {
-		return err
-	}
-	p, err := s.assetPath(app, category, name)
-	if err != nil {
-		return err
-	}
-	b, err := io.ReadAll(io.LimitReader(r, 10<<20))
-	if err != nil {
-		return err
-	}
-	if len(b) == 0 {
-		return invalid("file is empty")
-	}
-	return writeFile(p, b, 0o600)
-}
-
-func (s *Store) DeleteAsset(app, category, name string) error {
-	p, err := s.assetPath(app, category, name)
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(p); errors.Is(err, fs.ErrNotExist) {
-		return ErrNotFound
-	} else {
-		return err
 	}
 }
 
@@ -689,127 +832,4 @@ func (s *Store) PruneRuns(before time.Time) (int, error) {
 		}
 	}
 	return removed, nil
-}
-
-// ---- export / import ----
-
-// ExportApp writes the application folder as a zip. Unless includeKeys is
-// set, private keys are left out and literal secrets in auth profiles are
-// replaced with a placeholder.
-func (s *Store) ExportApp(app string, w io.Writer, includeKeys bool) error {
-	if _, err := s.GetApp(app); err != nil {
-		return err
-	}
-	zw := zip.NewWriter(w)
-	root := s.AppDir(app)
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		rel, _ := filepath.Rel(root, p)
-		rel = filepath.ToSlash(rel)
-		if !includeKeys && strings.HasPrefix(rel, "assets/certs/") {
-			a := Asset{Category: "certs"}
-			if info, e := d.Info(); e == nil {
-				a.Size = info.Size()
-			}
-			describe(&a, p)
-			if a.Kind == "private-key" {
-				return nil
-			}
-		}
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return err
-		}
-		if !includeKeys && strings.HasPrefix(rel, "assets/auth/") && strings.HasSuffix(rel, ".yaml") {
-			var prof model.AuthProfile
-			if yaml.UnmarshalWithOptions(b, &prof, yaml.Strict()) == nil {
-				masked := prof.Masked()
-				if redacted, err := yaml.MarshalWithOptions(masked, yaml.Indent(2), yaml.IndentSequence(true)); err == nil {
-					b = bytes.ReplaceAll(redacted, []byte(model.SecretMask), []byte("CHANGE_ME"))
-				}
-			}
-		}
-		f, err := zw.Create(app + "/" + rel)
-		if err != nil {
-			return err
-		}
-		_, err = f.Write(b)
-		return err
-	})
-	if err != nil {
-		return err
-	}
-	return zw.Close()
-}
-
-// ImportApp unpacks a zip produced by ExportApp and returns the app id.
-func (s *Store) ImportApp(data []byte) (string, error) {
-	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return "", invalid("not a zip file: %v", err)
-	}
-	app := ""
-	type item struct {
-		rel string
-		f   *zip.File
-	}
-	var items []item
-	for _, f := range zr.File {
-		if f.FileInfo().IsDir() {
-			continue
-		}
-		parts := strings.Split(f.Name, "/")
-		if len(parts) < 2 || !model.ValidID(parts[0]) {
-			return "", invalid("unexpected entry %q", f.Name)
-		}
-		if app == "" {
-			app = parts[0]
-		}
-		if parts[0] != app {
-			return "", invalid("zip holds more than one application")
-		}
-		rel := parts[1:]
-		ok := false
-		switch {
-		case len(rel) == 1 && rel[0] == "application.yaml":
-			ok = true
-		case len(rel) == 2 && rel[0] == "scenarios" && strings.HasSuffix(rel[1], ".yaml") && model.ValidID(strings.TrimSuffix(rel[1], ".yaml")):
-			ok = true
-		case len(rel) == 3 && rel[0] == "assets" && (rel[1] == "auth" || rel[1] == "tls") && strings.HasSuffix(rel[2], ".yaml") && model.ValidID(strings.TrimSuffix(rel[2], ".yaml")):
-			ok = true
-		case len(rel) == 3 && rel[0] == "assets" && validCategory(rel[1]) && model.ValidFileName(rel[2]):
-			ok = true
-		}
-		if !ok {
-			return "", invalid("unexpected entry %q", f.Name)
-		}
-		items = append(items, item{strings.Join(rel, "/"), f})
-	}
-	if app == "" {
-		return "", invalid("zip is empty")
-	}
-	for _, it := range items {
-		rc, err := it.f.Open()
-		if err != nil {
-			return "", err
-		}
-		b, err := io.ReadAll(io.LimitReader(rc, 10<<20))
-		rc.Close()
-		if err != nil {
-			return "", err
-		}
-		mode := os.FileMode(0o644)
-		if strings.HasPrefix(it.rel, "assets/") {
-			mode = 0o600
-		}
-		if err := writeFile(filepath.Join(s.AppDir(app), filepath.FromSlash(it.rel)), b, mode); err != nil {
-			return "", err
-		}
-	}
-	if _, err := s.GetApp(app); err != nil {
-		return "", invalid("zip has no valid application.yaml: %v", err)
-	}
-	return app, nil
 }

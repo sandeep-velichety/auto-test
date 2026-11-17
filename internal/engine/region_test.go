@@ -38,7 +38,7 @@ func TestEnvironmentRegionMatrix(t *testing.T) {
 	}
 	shop.DefaultEnvironment = "stage/NA"
 	must(t, st.SaveApp(shop))
-	must(t, st.SaveAuth("shop", &model.AuthProfile{ID: "token", Type: model.AuthOAuth2ClientCredentials,
+	must(t, st.SaveAuth(&model.AuthProfile{ID: "token", Type: model.AuthOAuth2ClientCredentials,
 		OAuth2: &model.OAuth2Auth{TokenURL: "{{baseUrl}}/oauth/token", ClientID: demo.ClientID, ClientSecret: "wrong-everywhere"},
 		Environments: map[string]map[string]any{
 			"stage": {"oauth2": map[string]any{"clientSecret": demo.ClientSecret}}, // right for all of stage

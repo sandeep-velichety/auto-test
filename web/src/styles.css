@@ -129,3 +129,6 @@ details { margin: 6px 0; } summary { cursor: pointer; color: var(--muted); }
 .tryit { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 10px; }
 
 .picker { margin: 4px 0 10px; } .picker select { width: auto; max-width: 100%; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 10px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--accent-soft); font-weight: 600; }
+.side-item.global { display: flex; flex-direction: column; gap: 1px; margin-bottom: 12px; } .side-item.global .side-sub { word-break: normal; }

@@ -1,6 +1,6 @@
 id: team-flows
 name: Team flows
-description: Scenarios that follow one business flow across several applications, borrowing each application's auth profile and environment values.
+description: Scenarios that follow one business flow across several applications, using the global auth profiles and each application's environment values.
 defaultEnvironment: local
 environments:
   local:

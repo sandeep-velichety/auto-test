@@ -4,7 +4,7 @@ id: oauth-client
 name: Token from the identity provider
 type: oauth2_client_credentials
 oauth2:
-  tokenUrl: "{{baseUrl}}/oauth/token"
+  tokenUrl: "{{sample-config.baseUrl}}/oauth/token"
   clientId: demo-client
   clientSecret: demo-secret   # real setups: "{{$env.ORDERS_CLIENT_SECRET}}"
   # scopes: [orders.read, orders.write]

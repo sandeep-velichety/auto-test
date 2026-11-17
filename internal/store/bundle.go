@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -27,18 +28,18 @@ type Bundle struct {
 	Requires    *Requires           `yaml:"requires,omitempty" json:"requires,omitempty"`
 }
 
-// Requires lists what the receiving application must provide itself.
+// Requires lists what the receiving workspace must provide itself.
 type Requires struct {
 	Variables []string `yaml:"variables,omitempty" json:"variables,omitempty"` // environment values, as {{name}}
 	Files     []string `yaml:"files,omitempty" json:"files,omitempty"`         // certificate and proto files
-	External  []string `yaml:"external,omitempty" json:"external,omitempty"`   // assets borrowed from other applications
+	External  []string `yaml:"external,omitempty" json:"external,omitempty"`   // older exports: assets borrowed from other applications
 	Secrets   []string `yaml:"secrets,omitempty" json:"secrets,omitempty"`     // profiles whose secrets were replaced with CHANGE_ME
 }
 
 var varRe = regexp.MustCompile(`\{\{\s*([^{}\s]+)\s*\}\}`)
 
-// ExportScenario returns a scenario and everything it refers to in this
-// application as one YAML document. Secrets are replaced with CHANGE_ME and
+// ExportScenario returns a scenario and the global auth profiles and
+// certificate sets it refers to as one YAML document. Secrets are replaced with CHANGE_ME and
 // key files are never included.
 func (s *Store) ExportScenario(app, id string) ([]byte, error) {
 	sc, err := s.GetScenario(app, id)
@@ -85,7 +86,7 @@ func (s *Store) ExportScenario(app, id string) ([]byte, error) {
 		b.Scenario.Auth = a.DefaultAuth
 	}
 	// Sets that apply by host travel too: the scenario may rely on them.
-	if sets, err := s.ListCertSets(app); err == nil {
+	if sets, err := s.ListCertSets(); err == nil {
 		for _, c := range sets {
 			if len(c.Hosts) > 0 {
 				setIDs[c.ID] = true
@@ -100,7 +101,7 @@ func (s *Store) ExportScenario(app, id string) ([]byte, error) {
 		}
 	}
 	for _, id := range sortedKeys(authIDs) {
-		p, err := s.GetAuth(app, id)
+		p, err := s.GetAuth(id)
 		if err != nil {
 			return nil, fmt.Errorf("auth profile %q used by the scenario: %w", id, err)
 		}
@@ -111,10 +112,15 @@ func (s *Store) ExportScenario(app, id string) ([]byte, error) {
 		if masked.TLS != nil {
 			tlsFiles(masked.TLS)
 		}
+		for env := range p.Environments {
+			if eff, err := p.ForEnv(env); err == nil && eff.TLS != nil {
+				tlsFiles(eff.TLS)
+			}
+		}
 		b.Auth = append(b.Auth, masked)
 	}
 	for _, id := range sortedKeys(setIDs) {
-		c, err := s.GetCertSet(app, id)
+		c, err := s.GetCertSet(id)
 		if err != nil {
 			return nil, fmt.Errorf("certificate set %q used by the scenario: %w", id, err)
 		}
@@ -127,8 +133,8 @@ func (s *Store) ExportScenario(app, id string) ([]byte, error) {
 	b.Requires.Files = sortedKeys(files)
 	sort.Strings(b.Requires.External)
 
-	// Variables the receiving application must define: everything referenced
-	// that the scenario does not set or capture itself.
+	// Variables the receiving side must define: everything referenced that
+	// the scenario does not set or capture itself.
 	body, err := yaml.Marshal(struct {
 		S model.Scenario
 		A []model.AuthProfile
@@ -184,8 +190,8 @@ type ImportResult struct {
 
 // ImportScenario stores a scenario from YAML: either a bundle written by
 // ExportScenario or a plain scenario file. Auth profiles and certificate
-// sets from a bundle are created only where the application has none with
-// that id, so existing credentials are never overwritten. An existing
+// sets from a bundle become global ones, created only where none with that
+// id exists, so existing credentials are never overwritten. An existing
 // scenario with the same id is replaced only when overwrite is set.
 func (s *Store) ImportScenario(app string, data []byte, overwrite bool) (*ImportResult, error) {
 	a, err := s.GetApp(app)
@@ -226,22 +232,22 @@ func (s *Store) ImportScenario(app string, data []byte, overwrite bool) (*Import
 	res := &ImportResult{Scenario: sc.ID, Created: []string{}, Kept: []string{}, Requires: b.Requires}
 	for i := range b.Auth {
 		p := &b.Auth[i]
-		if _, err := s.GetAuth(app, p.ID); err == nil {
+		if _, err := s.GetAuth(p.ID); err == nil {
 			res.Kept = append(res.Kept, "auth profile "+p.ID)
 			continue
 		}
-		if err := s.SaveAuth(app, p); err != nil {
+		if err := s.SaveAuth(p); err != nil {
 			return nil, err
 		}
 		res.Created = append(res.Created, "auth profile "+p.ID)
 	}
 	for i := range b.CertSets {
 		c := &b.CertSets[i]
-		if _, err := s.GetCertSet(app, c.ID); err == nil {
+		if _, err := s.GetCertSet(c.ID); err == nil {
 			res.Kept = append(res.Kept, "certificate set "+c.ID)
 			continue
 		}
-		if err := s.SaveCertSet(app, c); err != nil {
+		if err := s.SaveCertSet(c); err != nil {
 			return nil, err
 		}
 		res.Created = append(res.Created, "certificate set "+c.ID)
@@ -249,8 +255,23 @@ func (s *Store) ImportScenario(app string, data []byte, overwrite bool) (*Import
 	if err := s.SaveScenario(app, sc); err != nil {
 		return nil, err
 	}
+	// Exports from before auth became global may say "other-app/profile".
+	m := &migration{s: s, keep: true, auth: map[string]map[string]string{}, sets: map[string]map[string]string{}}
+	if err := m.rewriteRefs(app); err != nil {
+		return nil, err
+	}
 	if b.Requires != nil {
-		env := a.Environments[a.DefaultEnvironment]
+		env := map[string]string{}
+		if g, err := s.GetGlobal(); err == nil {
+			name := a.DefaultEnvironment
+			if name == "" {
+				name = g.DefaultEnvironment
+			}
+			env = model.LayeredValues(g.Values, name)
+			for k, v := range model.LayeredValues(a.Environments, name) {
+				env[k] = v
+			}
+		}
 		for _, v := range b.Requires.Variables {
 			if _, ok := env[v]; !ok && !strings.Contains(v, ".") {
 				res.Missing = append(res.Missing, "variable "+v)
@@ -258,7 +279,11 @@ func (s *Store) ImportScenario(app string, data []byte, overwrite bool) (*Import
 		}
 		for _, f := range b.Requires.Files {
 			cat, name, _ := strings.Cut(f, "/")
-			if _, err := os.Stat(s.AssetDir(app, cat) + "/" + name); err != nil {
+			dir := s.CertsDir()
+			if cat == "protos" {
+				dir = s.ProtosDir(app)
+			}
+			if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 				res.Missing = append(res.Missing, "file "+f)
 			}
 		}

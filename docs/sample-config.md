@@ -1,28 +1,30 @@
 # Sample configuration: certificates, auth, HTTP headers, gRPC over mTLS
 
-A complete, runnable example lives in `examples/workspace/applications/sample-config`. This page walks through it file by file so you can copy the pattern for your own application.
+A complete, runnable example lives in `examples/workspace`: the certificates and auth are in `global/`, and the `sample-config` application uses them. This page walks through it file by file so you can copy the pattern.
 
-The model in one paragraph: every application configures its own certificates and auth, each of which can differ per environment. When you create a test you choose two things independently: **auth** (how it gets a token, key or headers) and **mutual TLS** (whether a client certificate is presented, and which one).
+The model in one paragraph: certificates and auth are configured once, globally, and every application uses them. Each one can hold different values per environment (and region). When you create a test you choose two things independently: **auth** (how it gets a token, key or headers) and **mutual TLS** (whether a client certificate is presented, and which one).
 
 ```
+global/                               shared by every application
+  settings.yaml                       the environments (local, staging)
+  certs/                              certificate and key files (PEM)
+    demo-client.crt                   client certificate
+    demo-client.key                   client private key
+    demo-ca.crt                       CA that signed the server's certificate
+  tls/                                certificate sets: which files to present for mutual TLS
+    client.yaml                       the client certificate, used automatically for one host
+    trust-only.yaml                   trusts the CA, presents nothing (for negative tests)
+  auth/                               one file per auth profile
+    oauth-client.yaml                 token from an identity provider (OAuth2), differs per environment
+    login-call.yaml                   token from a custom HTTP call
+    tenant-headers.yaml               fixed headers / keys
+    okta-client.yaml                  Okta template
+    forgerock-client.yaml             ForgeRock template
+    basic-user.yaml                   username and password (template)
+    static-token.yaml                 fixed bearer token (template)
+    ...                               profiles used by the other example applications
 applications/sample-config/
-  application.yaml                    environments (local, staging) and their values
-  assets/
-    certs/                            certificate and key files (PEM)
-      demo-client.crt                 client certificate
-      demo-client.key                 client private key
-      demo-ca.crt                     CA that signed the server's certificate
-    tls/                              certificate sets: which files to present for mutual TLS
-      client.yaml                     the client certificate, used automatically for one host
-      trust-only.yaml                 trusts the CA, presents nothing (for negative tests)
-    auth/                             one file per auth profile
-      oauth-client.yaml               token from an identity provider (OAuth2), differs per environment
-      login-call.yaml                 token from a custom HTTP call
-      tenant-headers.yaml             fixed headers / keys
-      okta-client.yaml                Okta template
-      forgerock-client.yaml           ForgeRock template
-      basic-user.yaml                 username and password (template)
-      static-token.yaml               fixed bearer token (template)
+  application.yaml                    this application's values for local and staging
   scenarios/
     headers-and-mtls.yaml             HTTP with headers, three kinds of token, gRPC with metadata
 ```
@@ -40,7 +42,7 @@ The demo system listens on `http://127.0.0.1:8089` (REST, an OAuth2 token endpoi
 
 ## 1. Certificates
 
-Certificates and keys are plain PEM files in the application's `assets/certs` folder. Three files matter:
+Certificates and keys are plain PEM files in the workspace's `global/certs` folder. Three files matter:
 
 | File | Needed | What it is |
 | --- | --- | --- |
@@ -50,8 +52,8 @@ Certificates and keys are plain PEM files in the application's `assets/certs` fo
 
 Three ways to put them in place:
 
-- **UI:** Auth & assets, then "Upload certificate or key"; or use the Upload button next to each file in a certificate set.
-- **Files:** copy them into `applications/<app>/assets/certs/` (mode `0600` for keys).
+- **UI:** Global, "Auth & certificates", then "Upload certificate or key"; or use the Upload button next to each file in a certificate set.
+- **Files:** copy them into `global/certs/` (mode `0600` for keys).
 - **Pipeline:** write the key from a CI secret before the run (see `docs/deployment.md`).
 
 For your real services, use the certificates your security team issues. To create a throwaway set for a test environment with OpenSSL:
@@ -69,8 +71,8 @@ openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
   -days 365 -extfile client.ext -out client.crt
 
 # 3. Put the client files (and the CA the SERVER's certificate chains to) next to the application
-cp client.crt client.key ca.crt applications/<app>/assets/certs/
-chmod 600 applications/<app>/assets/certs/client.key
+cp client.crt client.key ca.crt global/certs/
+chmod 600 global/certs/client.key
 ```
 
 The service must be configured to trust the CA that signed `client.crt`. If your key is password protected, remove the password first (`openssl pkey -in enc.key -out client.key`); encrypted keys are not supported.
@@ -85,13 +87,13 @@ It reports a missing file, a certificate where a key should be, a key that does 
 
 ## 2. Certificate sets
 
-A certificate set tells the application which of those files to present. `assets/tls/client.yaml`:
+A certificate set says which of those files to present. `global/tls/client.yaml`:
 
 ```yaml
 id: client
 name: Client certificate
 hosts:                       # present automatically on calls to these hosts
-  - "{{secureHost}}"         # a variable, so each environment can name its own host
+  - "{{sample-config.secureHost}}"   # the sample application's value, so each environment can name its own host
 cert: demo-client.crt
 key: demo-client.key
 ca: demo-ca.crt
@@ -101,21 +103,21 @@ environments:                # only what differs in an environment
     key: demo-client.key
 ```
 
-`assets/tls/trust-only.yaml` has only `ca`: it trusts the server and presents nothing, which is what a negative test needs.
+`global/tls/trust-only.yaml` has only `ca`: it trusts the server and presents nothing, which is what a negative test needs.
 
-In the UI: Auth & assets, "Certificate sets", + New. Pick the three files (or upload them there), optionally list hosts, and use the environment tabs for values that differ. Each file shows whether it is uploaded, of the right kind and unexpired.
+In the UI: Global, "Auth & certificates", "Certificate sets", + New. Pick the three files (or upload them there), optionally list hosts, and use the environment tabs for values that differ. Each file shows whether it is uploaded, of the right kind and unexpired.
 
 How a test uses it:
 
 | On the test | Result |
 | --- | --- |
-| nothing | the set whose `hosts` match the call is presented; if none matches, no certificate |
+| nothing | the set whose `hosts` match the call is presented, whichever application makes it; if none matches, no certificate |
 | `mtls: client` | that set is presented |
 | `mtls: none` | no certificate, even if a host matches |
 
 ## 3. Auth profiles
 
-Each file in `assets/auth` is one way to get credentials. A test picks one with `auth: <id>`; otherwise it inherits from the scenario, then from the application's `defaultAuth`. `auth: none` sends nothing.
+Each file in `global/auth` is one way to get credentials, usable by every application. A test picks one with `auth: <id>`; otherwise it inherits from the scenario, then from the application's `defaultAuth`. `auth: none` sends nothing.
 
 **Token from an identity provider**, used as a bearer token (`oauth-client.yaml`). The backend asks the provider for a token before the first test that needs it:
 
@@ -184,7 +186,7 @@ headers:
   X-Api-Key: "{{$env.ORDERS_API_KEY}}"    # the sample uses a literal demo value
 ```
 
-`{{$env.NAME}}` reads an environment variable of the backend (or of the pipeline job), so the secret is never in the file. In the UI the same profiles are created under Auth & assets; "Try it" resolves the profile for the chosen environment and fetches a real token.
+`{{$env.NAME}}` reads an environment variable of the backend (or of the pipeline job), so the secret is never in the file. In the UI the same profiles are created under Global, "Auth & certificates"; "Try it" resolves the profile for the chosen environment and fetches a real token.
 
 ## 4. HTTP test with headers
 
@@ -276,8 +278,8 @@ Points that matter for gRPC over TLS:
 
 ## 6. Adapting it to your application
 
-1. Copy the `sample-config` folder under a new name and change `id` and `name` in `application.yaml`.
-2. List your environments with their addresses and hosts.
-3. Put your certificate files in `assets/certs` and name them in a certificate set, with per-environment files where they differ.
-4. Keep the auth profiles you need, point them at your identity provider, and replace literal secrets with `{{$env.NAME}}` references.
+1. List your environments (and regions) in `global/settings.yaml`, or under Global, "Environments & regions".
+2. Put your certificate files in `global/certs` and name them in a certificate set, with per-environment files where they differ.
+3. Keep the auth profiles you need in `global/auth`, point them at your identity provider, enter what differs per environment, and replace literal secrets with `{{$env.NAME}}` references. They are then ready for every application.
+4. Copy the `sample-config` application folder under a new name, change `id` and `name` in `application.yaml`, and fill in the application's addresses and hosts for each environment.
 5. Edit the scenario's URLs, methods, headers and expectations, then run `validate` and `run` for each environment.

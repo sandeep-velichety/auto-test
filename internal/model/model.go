@@ -50,19 +50,112 @@ func ValidID(s string) bool { return idRe.MatchString(s) }
 // ValidFileName reports whether s is a plain asset file name (no path parts).
 func ValidFileName(s string) bool { return fileRe.MatchString(s) }
 
-// Application is one system under test. It lives in
-// <workspace>/applications/<id>/application.yaml with its assets and
-// scenarios next to it.
-type Application struct {
-	ID                 string                       `yaml:"id" json:"id"`
-	Name               string                       `yaml:"name" json:"name"`
-	Description        string                       `yaml:"description,omitempty" json:"description,omitempty"`
-	DefaultEnvironment string                       `yaml:"defaultEnvironment,omitempty" json:"defaultEnvironment,omitempty"`
-	DefaultAuth        string                       `yaml:"defaultAuth,omitempty" json:"defaultAuth,omitempty"`
-	Environments       map[string]map[string]string `yaml:"environments,omitempty" json:"environments,omitempty"`
+// Global is what every application shares, stored in
+// <workspace>/global/settings.yaml: the list of environments and regions,
+// and values every application and every auth profile can use. Auth
+// profiles, certificate sets and certificate files are global too and live
+// next to it in global/auth, global/tls and global/certs.
+type Global struct {
+	// Environments and Regions define what a run can target. With regions,
+	// a run targets a pair written "environment/region", e.g. "stage/NA".
+	Environments []string `yaml:"environments,omitempty" json:"environments,omitempty"`
+	Regions      []string `yaml:"regions,omitempty" json:"regions,omitempty"`
+	// DefaultEnvironment is used where an application names none.
+	DefaultEnvironment string `yaml:"defaultEnvironment,omitempty" json:"defaultEnvironment,omitempty"`
+	// Values are variables shared by every application, per environment.
+	// Keys are an environment ("stage"), a region ("NA") or a pair
+	// ("stage/NA"); the more specific key wins. An application's own value
+	// of the same name wins over all of them.
+	Values map[string]map[string]string `yaml:"values,omitempty" json:"values,omitempty"`
 }
 
-// AuthProfile is stored in <app>/assets/auth/<id>.yaml.
+// DefaultGlobal is what a new workspace starts with.
+func DefaultGlobal() *Global {
+	return &Global{Environments: []string{"stage", "qa", "prod"}, Regions: []string{"NA", "AU"}, DefaultEnvironment: "stage/NA"}
+}
+
+// Keys lists every target a run can choose: each environment, or each
+// environment/region pair when regions are defined.
+func (g *Global) Keys() []string {
+	if len(g.Regions) == 0 {
+		return append([]string{}, g.Environments...)
+	}
+	keys := make([]string, 0, len(g.Environments)*len(g.Regions))
+	for _, e := range g.Environments {
+		for _, r := range g.Regions {
+			keys = append(keys, e+"/"+r)
+		}
+	}
+	return keys
+}
+
+// Has reports whether key is one of Keys.
+func (g *Global) Has(key string) bool {
+	for _, k := range g.Keys() {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
+var envNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
+
+// Validate checks the environment and region lists.
+func (g *Global) Validate() []string {
+	var errs []string
+	seen := map[string]bool{}
+	for _, list := range [][]string{g.Environments, g.Regions} {
+		for _, n := range list {
+			if !envNameRe.MatchString(n) {
+				errs = append(errs, fmt.Sprintf("name %q must be letters, digits, '-' or '_'", n))
+			}
+			if seen[n] {
+				errs = append(errs, fmt.Sprintf("name %q is used twice (an environment and a region cannot share a name)", n))
+			}
+			seen[n] = true
+		}
+	}
+	if len(g.Environments) == 0 {
+		errs = append(errs, "at least one environment is needed")
+	}
+	if g.DefaultEnvironment != "" && !g.Has(g.DefaultEnvironment) {
+		errs = append(errs, fmt.Sprintf("default environment %q is not in the list", g.DefaultEnvironment))
+	}
+	return errs
+}
+
+// LayeredValues reads per-environment values for one run target: values
+// under the environment name, then the region, then the exact pair, each
+// overriding the one before.
+func LayeredValues(m map[string]map[string]string, env string) map[string]string {
+	out := map[string]string{}
+	for _, layer := range EnvLayers(env) {
+		for k, v := range m[layer] {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// Application is one system under test. It lives in
+// <workspace>/applications/<id>/application.yaml with its scenarios and
+// proto files next to it. Auth and certificates are global.
+type Application struct {
+	ID                 string `yaml:"id" json:"id"`
+	Name               string `yaml:"name" json:"name"`
+	Description        string `yaml:"description,omitempty" json:"description,omitempty"`
+	DefaultEnvironment string `yaml:"defaultEnvironment,omitempty" json:"defaultEnvironment,omitempty"`
+	// DefaultAuth names a global auth profile used by tests that pick none.
+	DefaultAuth string `yaml:"defaultAuth,omitempty" json:"defaultAuth,omitempty"`
+	// Environments holds this application's own values (baseUrl, ...) for
+	// the globally defined environments. Keys follow the same rule as
+	// Global.Values: environment, region or environment/region.
+	Environments map[string]map[string]string `yaml:"environments,omitempty" json:"environments,omitempty"`
+}
+
+// AuthProfile is global: stored in <workspace>/global/auth/<id>.yaml and
+// usable by every application.
 type AuthProfile struct {
 	ID          string      `yaml:"id" json:"id"`
 	Name        string      `yaml:"name" json:"name"`
@@ -102,8 +195,9 @@ type HTTPCallAuth struct {
 	Prefix     string            `yaml:"prefix,omitempty" json:"prefix,omitempty"`         // default Bearer; "none" for the bare token
 }
 
-// CertSet is a named set of certificate files for mutual TLS, stored in
-// <app>/assets/tls/<id>.yaml. Tests choose one with "mtls: <id>".
+// CertSet is a named set of certificate files for mutual TLS. It is global:
+// stored in <workspace>/global/tls/<id>.yaml. Tests of any application
+// choose one with "mtls: <id>".
 type CertSet struct {
 	ID          string `yaml:"id" json:"id"`
 	Name        string `yaml:"name" json:"name"`
@@ -203,7 +297,7 @@ func (c *CertSet) Validate() []string {
 		}
 		for _, f := range []string{t.Cert, t.Key, t.CA} {
 			if f != "" && !ValidFileName(f) {
-				errs = append(errs, fmt.Sprintf("%sfile %q must be a plain file name in assets/certs", where, f))
+				errs = append(errs, fmt.Sprintf("%sfile %q must be a plain file name in global/certs", where, f))
 			}
 		}
 	}
@@ -245,7 +339,7 @@ type OAuth2Auth struct {
 	Prefix       string            `yaml:"prefix,omitempty" json:"prefix,omitempty"`         // default Bearer
 }
 
-// TLSSettings names files in <app>/assets/certs.
+// TLSSettings names files in <workspace>/global/certs.
 type TLSSettings struct {
 	Cert               string `yaml:"cert,omitempty" json:"cert,omitempty"`
 	Key                string `yaml:"key,omitempty" json:"key,omitempty"`
@@ -705,7 +799,7 @@ func (a *AuthProfile) validateOne() []string {
 		}
 		for _, f := range []string{a.TLS.Cert, a.TLS.Key, a.TLS.CA} {
 			if f != "" && !ValidFileName(f) {
-				add(fmt.Sprintf("tls file %q must be a plain file name in assets/certs", f))
+				add(fmt.Sprintf("tls file %q must be a plain file name in global/certs", f))
 			}
 		}
 	}

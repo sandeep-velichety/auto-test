@@ -25,8 +25,8 @@ function withIds(sc: Scenario): Scenario {
   return { ...sc, tests }
 }
 
-export function ScenarioEditor({ app, scenarioId, profiles, sets, protos, env, onSaved, onDeleted }: {
-  app: Application; scenarioId: string; profiles: AuthProfile[]; sets: CertSet[]; protos: string[]; env: string
+export function ScenarioEditor({ app, scenarioId, profiles, sets, protos, env, envs, onSaved, onDeleted }: {
+  app: Application; scenarioId: string; profiles: AuthProfile[]; sets: CertSet[]; protos: string[]; env: string; envs: string[]
   onSaved: (s: Scenario) => void; onDeleted: () => void
 }) {
   const [sc, setSc] = useState<Scenario | null>(null)
@@ -130,7 +130,7 @@ export function ScenarioEditor({ app, scenarioId, profiles, sets, protos, env, o
             <button type="button" className={mode === 'form' ? 'on' : ''} onClick={() => { if (mode !== 'form' && (!dirty || confirm('Discard unsaved YAML edits?'))) { setMode('form'); if (dirty) reload() } }}>Form</button>
             <button type="button" className={mode === 'yaml' ? 'on' : ''} onClick={() => { if (mode !== 'yaml' && (!dirty || confirm('Switch to YAML? Unsaved form changes are discarded.'))) { setMode('yaml'); if (dirty) reload() } }}>YAML</button>
           </div>
-          <button type="button" title="The scenario with the auth profiles and certificate sets it uses, in one YAML file" disabled={act.busy || dirty}
+          <button type="button" title="The scenario with the global auth profiles and certificate sets it uses, in one YAML file" disabled={act.busy || dirty}
             onClick={() => act.run(async () => download(await api.exportScenario(app.id, sc.id), sc.id + '.scenario.yaml'))}>Download YAML</button>
           <button type="button" className="link danger" onClick={remove}>Delete</button>
           <button type="button" onClick={save} disabled={act.busy || !dirty}>{saved && !dirty ? 'Saved' : 'Save'}</button>
@@ -155,7 +155,7 @@ export function ScenarioEditor({ app, scenarioId, profiles, sets, protos, env, o
             </div>
             <Field label="Description" wide><Text value={sc.description} onChange={description => change({ description: description || undefined })} /></Field>
             <Section title="Variables" count={Object.keys(sc.variables || {}).length}>
-              <p className="hint">Set once when the scenario starts and used as <code>{'{{name}}'}</code>. Built in: <code>{'{{$uuid}}'}</code>, <code>{'{{$timestamp}}'}</code>, <code>{'{{$isoTimestamp}}'}</code>, <code>{'{{$randomInt}}'}</code>, <code>{'{{$env.NAME}}'}</code>. Environment variables of the application ({Object.keys(app.environments?.[env] || {}).join(', ') || 'none yet'}) are available too.</p>
+              <p className="hint">Set once when the scenario starts and used as <code>{'{{name}}'}</code>. Built in: <code>{'{{$uuid}}'}</code>, <code>{'{{$timestamp}}'}</code>, <code>{'{{$isoTimestamp}}'}</code>, <code>{'{{$randomInt}}'}</code>, <code>{'{{$env.NAME}}'}</code>. This application’s values for the environment being run and the global shared values are available too.</p>
               <KV value={sc.variables} onChange={variables => change({ variables })} addLabel="Add variable" />
             </Section>
             <Section title="Properties" count={Object.keys(sc.properties || {}).length}>
@@ -212,7 +212,7 @@ export function ScenarioEditor({ app, scenarioId, profiles, sets, protos, env, o
       )}
       <div className="card">
         <Section title="History of this scenario on this backend" open={false}>
-          <History app={app.id} scenario={sc.id} envs={Object.keys(app.environments || {})} refresh={run?.id} />
+          <History app={app.id} scenario={sc.id} envs={envs} refresh={run?.id} />
         </Section>
       </div>
     </div>

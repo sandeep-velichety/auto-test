@@ -23,7 +23,7 @@ Sources: [Sematext](https://sematext.com/blog/best-8-postman-alternatives-review
 - Tests as plain files that can live in Git (Bruno's main selling point).
 - A headless runner with JUnit output for pipelines (Postman's Newman, Insomnia's Inso, Bruno's CLI).
 - Form-based authoring without code (Katalon), with YAML available for those who prefer it.
-- An uncluttered screen: one application, four tabs, one scenario open at a time.
+- An uncluttered screen: one application, three tabs, one scenario open at a time. Auth, certificates and the environment list sit in one Global area instead of being repeated inside every application (Postman keeps certificates in app-wide settings and environments at workspace level for the same reason).
 - Environments, inherited auth and client certificates per host (Postman).
 
 ## What was missing, and what was done
@@ -34,7 +34,7 @@ Sources: [Sematext](https://sematext.com/blog/best-8-postman-alternatives-review
 | Try one request while writing it | every interactive client; Bruno's single-request run | "Run to this step" button on each step; partial runs are not stored in history | built |
 | See at a glance what passed | collection runners | last result shown on each scenario in the list and on each step after a run | built |
 | Start from something that already exists | import from cURL in several tools | "Paste cURL" creates an HTTP step | built |
-| Move a test between workspaces as one file | Postman collection export | "Download YAML" exports a scenario with the auth profiles and certificate sets it uses; "Import" reads it back | built |
+| Move a test between workspaces as one file | Postman collection export | "Download YAML" exports a scenario with the global auth profiles and certificate sets it uses; "Import" reads it back | built |
 | Find a scenario in a long list | all | filter box by name or tag (appears once there are more than four scenarios) | built |
 | Data-driven runs (one scenario over a table of inputs) | Postman runner, ReadyAPI | worth doing next; changes how scenarios are written, so it needs its own design | not built |
 | Import from OpenAPI or a Postman collection | several | useful for onboarding existing suites; not needed for new ones | not built |

@@ -1,4 +1,4 @@
-import type { Application, Asset, AuthCheckResult, AuthProfile, Backend, CertSet, GrpcService, RunQuery, RunResult, Scenario } from './types'
+import type { Application, Asset, AuthCheckResult, AuthProfile, Backend, CertSet, Global, GrpcService, RunQuery, RunResult, Scenario, Usage } from './types'
 
 // ---- backend connections (kept in this browser only) ----
 
@@ -104,17 +104,26 @@ export const api = {
   scenarioYaml: (app: string, id: string) => call<string>('GET', `/apps/${e(app)}/scenarios/${e(id)}/yaml`, undefined, true),
   saveScenarioYaml: (app: string, id: string, yaml: string) => call<Scenario>('PUT', `/apps/${e(app)}/scenarios/${e(id)}/yaml`, yaml),
 
-  auth: (app: string, env = '') => call<AuthProfile[]>('GET', `/apps/${e(app)}/auth?env=${e(env)}`),
-  certSets: (app: string, env = '') => call<CertSet[]>('GET', `/apps/${e(app)}/tls?env=${e(env)}`),
-  saveCertSet: (app: string, c: CertSet) => call<CertSet>('PUT', `/apps/${e(app)}/tls/${e(c.id)}`, c),
-  deleteCertSet: (app: string, id: string) => call<void>('DELETE', `/apps/${e(app)}/tls/${e(id)}`),
-  saveAuth: (app: string, p: AuthProfile) => call<AuthProfile>('PUT', `/apps/${e(app)}/auth/${e(p.id)}`, p),
-  deleteAuth: (app: string, id: string) => call<void>('DELETE', `/apps/${e(app)}/auth/${e(id)}`),
-  checkAuth: (app: string, id: string, env: string, mtls = '') => call<AuthCheckResult>('POST', `/apps/${e(app)}/auth/${e(id)}/check?env=${e(env)}&mtls=${e(mtls)}`),
+  // Global: shared by every application.
+  global: () => call<Global>('GET', '/global'),
+  saveGlobal: (g: Global) => call<Global>('PUT', '/global', { environments: g.environments, regions: g.regions, defaultEnvironment: g.defaultEnvironment, values: g.values }),
+  usage: () => call<Usage>('GET', '/global/usage'),
+  auth: (env = '') => call<AuthProfile[]>('GET', `/global/auth?env=${e(env)}`),
+  saveAuth: (p: AuthProfile) => call<AuthProfile>('PUT', `/global/auth/${e(p.id)}`, p),
+  deleteAuth: (id: string) => call<void>('DELETE', `/global/auth/${e(id)}`),
+  /** Tries a profile for real. app optionally fills its variables with that application's values. */
+  checkAuth: (id: string, env: string, mtls = '', app = '') => call<AuthCheckResult>('POST', `/global/auth/${e(id)}/check?env=${e(env)}&mtls=${e(mtls)}&app=${e(app)}`),
+  certSets: (env = '') => call<CertSet[]>('GET', `/global/tls?env=${e(env)}`),
+  saveCertSet: (c: CertSet) => call<CertSet>('PUT', `/global/tls/${e(c.id)}`, c),
+  deleteCertSet: (id: string) => call<void>('DELETE', `/global/tls/${e(id)}`),
+  certs: () => call<Asset[]>('GET', '/global/certs'),
+  uploadCert: (name: string, data: ArrayBuffer) => call<void>('PUT', `/global/certs/${e(name)}`, data),
+  deleteCert: (name: string) => call<void>('DELETE', `/global/certs/${e(name)}`),
 
-  assets: (app: string) => call<Asset[]>('GET', `/apps/${e(app)}/assets`),
-  uploadAsset: (app: string, category: string, name: string, data: ArrayBuffer) => call<void>('PUT', `/apps/${e(app)}/assets/${e(category)}/${e(name)}`, data),
-  deleteAsset: (app: string, category: string, name: string) => call<void>('DELETE', `/apps/${e(app)}/assets/${e(category)}/${e(name)}`),
+  // An application's own .proto files.
+  protos: (app: string) => call<Asset[]>('GET', `/apps/${e(app)}/protos`),
+  uploadProto: (app: string, name: string, data: ArrayBuffer) => call<void>('PUT', `/apps/${e(app)}/protos/${e(name)}`, data),
+  deleteProto: (app: string, name: string) => call<void>('DELETE', `/apps/${e(app)}/protos/${e(name)}`),
 
   run: (app: string, req: { environment?: string; scenarios?: string[]; kind?: string; until?: string }) => call<RunResult>('POST', `/apps/${e(app)}/run`, req),
   runs: (app: string, q: RunQuery = {}) => {

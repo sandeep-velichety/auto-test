@@ -1,5 +1,6 @@
-# Sample configuration: everything here belongs to this one application,
-# and can differ per environment. Walkthrough: docs/sample-config.md
+# Sample configuration: this application's own values for each environment.
+# The auth profiles and certificates it uses are global (../../global).
+# Walkthrough: docs/sample-config.md
 id: sample-config
 name: Sample configuration
 description: Reference setup for certificate sets, auth profiles, HTTP headers and gRPC metadata over mutual TLS. Runs against "testplane demo".

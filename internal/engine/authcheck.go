@@ -20,38 +20,24 @@ type AuthCheck struct {
 	CertChecks []auth.Check `json:"certChecks,omitempty"`
 }
 
-// CheckAuth resolves a profile as a run in that environment would: it loads
-// certificates and fetches tokens from the real endpoints. mtlsID optionally
-// names the certificate set to combine it with.
+// CheckAuth resolves a global profile as a run in that environment would:
+// it loads certificates and fetches tokens from the real endpoints. appID
+// optionally names the application whose values fill the profile's
+// variables; mtlsID optionally names the certificate set to combine it with.
 func (e *Engine) CheckAuth(ctx context.Context, appID, profileID, envName, mtlsID string) (*AuthCheck, error) {
-	app, err := e.Store.GetApp(appID)
+	p, err := e.Store.GetAuth(profileID)
 	if err != nil {
 		return nil, err
 	}
-	p, err := e.Store.GetAuth(appID, profileID)
+	run, err := e.adhoc(appID, envName)
 	if err != nil {
 		return nil, err
 	}
-	if envName == "" {
-		envName = app.DefaultEnvironment
-	}
-	vars := map[string]string{}
-	if envName != "" {
-		env, ok := app.Environments[envName]
-		if !ok {
-			return nil, fmt.Errorf("%w: application %q has no environment %q", store.ErrInvalid, appID, envName)
-		}
-		for k, v := range env {
-			vars[k] = v
-		}
-	}
-	certsDir := e.Store.AssetDir(appID, "certs")
-	eff, err := p.ForEnv(envName)
+	eff, err := p.ForEnv(run.shared.env)
 	if err != nil {
 		return nil, err
 	}
-	out := &AuthCheck{CertChecks: auth.CertChecks(eff, certsDir)}
-	run := &scenarioRun{e: e, app: app, sc: &model.Scenario{}, vars: vars, shared: &runShared{store: e.Store, appEnv: map[string]map[string]string{}, env: envName, resolver: auth.NewResolver("")}}
+	out := &AuthCheck{CertChecks: auth.CertChecks(eff, e.Store.CertsDir())}
 	creds, err := run.credentials(ctx, profileID, mtlsID)
 	if err != nil {
 		out.Error = err.Error()
@@ -70,27 +56,23 @@ func (e *Engine) CheckAuth(ctx context.Context, appID, profileID, envName, mtlsI
 }
 
 // adhoc prepares what a single call outside a run needs: the environment's
-// variables and a credential resolver.
+// variables and a credential resolver. Without an application, only global
+// values and {{app-id.name}} values are available.
 func (e *Engine) adhoc(appID, envName string) (*scenarioRun, error) {
-	app, err := e.Store.GetApp(appID)
+	app := &model.Application{}
+	if appID != "" {
+		a, err := e.Store.GetApp(appID)
+		if err != nil {
+			return nil, err
+		}
+		app = a
+	}
+	envName, vars, err := e.environment(app, envName)
 	if err != nil {
 		return nil, err
 	}
-	if envName == "" {
-		envName = app.DefaultEnvironment
-	}
-	vars := map[string]string{}
-	if envName != "" {
-		env, ok := app.Environments[envName]
-		if !ok {
-			return nil, fmt.Errorf("%w: application %q has no environment %q", store.ErrInvalid, appID, envName)
-		}
-		for k, v := range env {
-			vars[k] = v
-		}
-	}
 	return &scenarioRun{e: e, app: app, sc: &model.Scenario{}, vars: vars,
-		shared: &runShared{store: e.Store, appEnv: map[string]map[string]string{}, env: envName, resolver: auth.NewResolver("")}}, nil
+		shared: &runShared{env: envName, resolver: auth.NewResolver(e.Store.CertsDir())}}, nil
 }
 
 // DescribeGRPC lists the services and methods of a gRPC target, using the
@@ -111,14 +93,15 @@ func (e *Engine) DescribeGRPC(ctx context.Context, appID, envName, authID, mtlsI
 	if authID == "" {
 		authID = run.app.DefaultAuth
 	}
+	authID = firstSet(authID, model.AuthNone)
 	if mtlsID == "" {
-		mtlsID = run.matchSet(step.Target)
+		mtlsID = run.matchSet(step.Target, authID)
 	}
-	creds, err := run.credentials(ctx, firstSet(authID, model.AuthNone), mtlsID)
+	creds, err := run.credentials(ctx, authID, mtlsID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", store.ErrInvalid, err)
 	}
-	out, err := executor.GRPCDescribe(ctx, &step, creds, e.Store.AssetDir(appID, "protos"))
+	out, err := executor.GRPCDescribe(ctx, &step, creds, e.Store.ProtosDir(appID))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", store.ErrInvalid, err)
 	}

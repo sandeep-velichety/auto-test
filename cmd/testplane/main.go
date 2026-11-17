@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -36,7 +35,8 @@ const usage = `testplane - scenario based API, messaging and data test runner
 Usage:
   testplane serve     --workspace DIR [--addr :8080] [--token T]   web UI + REST API
   testplane run       --workspace DIR --app ID [options]      run tests headless (CI/CD)
-  testplane validate  --workspace DIR [--app ID]              check YAML and auth assets
+  testplane validate  --workspace DIR [--app ID]              check YAML, global auth and certificates
+  testplane migrate   --workspace DIR                         move auth and certificates kept inside applications to global/
   testplane list      --workspace DIR                         list applications and scenarios
   testplane export    --workspace DIR --app ID [--scenario ID] [--out FILE]
                                                               one scenario as YAML, or the application as a zip
@@ -75,6 +75,43 @@ func workspaceFlag(fs *flag.FlagSet) *string {
 	return fs.String("workspace", def, "workspace directory")
 }
 
+// openStore opens a workspace and brings an older layout up to date first
+// (auth and certificates used to live inside each application).
+func openStore(ws string) *store.Store {
+	st := store.New(ws)
+	notes, err := st.Migrate()
+	if len(notes) > 0 {
+		fmt.Fprintln(os.Stderr, "workspace updated: auth and certificates are now global (see global/)")
+		for _, n := range notes {
+			fmt.Fprintln(os.Stderr, "  "+n)
+		}
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: updating the workspace:", err)
+		os.Exit(2)
+	}
+	return st
+}
+
+func migrateCmd(args []string) int {
+	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
+	ws := workspaceFlag(fs)
+	_ = fs.Parse(args)
+	st := store.New(*ws)
+	notes, err := st.Migrate()
+	for _, n := range notes {
+		fmt.Println(n)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 2
+	}
+	if len(notes) == 0 {
+		fmt.Println("nothing to do: auth and certificates are already global")
+	}
+	return 0
+}
+
 func die(err error) {
 	fmt.Fprintln(os.Stderr, "error:", err)
 	os.Exit(2)
@@ -91,6 +128,8 @@ func main() {
 		serve(args)
 	case "run":
 		os.Exit(run(args))
+	case "migrate":
+		os.Exit(migrateCmd(os.Args[2:]))
 	case "validate":
 		os.Exit(validate(args))
 	case "list":
@@ -123,7 +162,7 @@ func serve(args []string) {
 	if err := os.MkdirAll(filepath.Join(*ws, "applications"), 0o755); err != nil {
 		die(err)
 	}
-	srv := api.New(store.New(*ws), web.FS())
+	srv := api.New(openStore(*ws), web.FS())
 	srv.Token, srv.AllowOrigins, srv.RetentionDays = *token, csv(origins), *retention
 	srv.Prune()
 	access := "no access token (anyone who can reach this address can use it)"
@@ -138,8 +177,8 @@ func run(args []string) int {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	ws := workspaceFlag(fs)
 	app := fs.String("app", "", "application id (required)")
-	env := fs.String("env", "", "environment name (default: the application's default)")
-	region := fs.String("region", "", "region, for applications whose environments are environment/region pairs (same as --env ENV/REGION)")
+	env := fs.String("env", "", "environment name (default: the application's default, else the global default)")
+	region := fs.String("region", "", "region, when the global list has regions (same as --env ENV/REGION)")
 	kind := fs.String("kind", "", "positive = skip negative cases, negative = skip positive variants")
 	junit := fs.String("junit", "", "write a JUnit XML report to this file")
 	jsonOut := fs.String("json", "", "write the full JSON result to this file")
@@ -169,13 +208,16 @@ func run(args []string) int {
 		}
 		overrides[k] = val
 	}
-	st := store.New(*ws)
+	st := openStore(*ws)
 	if *region != "" {
 		name := *env
 		if name == "" {
-			// No --env: keep the environment of the application's default pair.
+			// No --env: keep the environment of the default pair.
 			if a, err := st.GetApp(*app); err == nil {
 				name, _, _ = strings.Cut(a.DefaultEnvironment, "/")
+			}
+			if g, err := st.GetGlobal(); err == nil && name == "" {
+				name, _, _ = strings.Cut(g.DefaultEnvironment, "/")
 			}
 		}
 		if name == "" || strings.Contains(name, "/") {
@@ -279,7 +321,7 @@ func validate(args []string) int {
 	ws := workspaceFlag(fs)
 	only := fs.String("app", "", "validate one application (default: all)")
 	_ = fs.Parse(args)
-	st := store.New(*ws)
+	st := openStore(*ws)
 	apps, err := st.ListApps()
 	if err != nil {
 		die(err)
@@ -289,74 +331,98 @@ func validate(args []string) int {
 		problems++
 		fmt.Printf("  PROBLEM %s: %s\n", where, msg)
 	}
+
+	// Global: the environment list, auth profiles and certificate sets,
+	// checked for every environment.
+	fmt.Println("global")
+	g, err := st.GetGlobal()
+	if err != nil {
+		report("settings", err.Error())
+		g = model.DefaultGlobal()
+	}
+	for _, e := range g.Validate() {
+		report("settings", e)
+	}
+	envs := append([]string{""}, g.Keys()...)
+	profiles, err := st.ListAuth()
+	if err != nil {
+		die(err)
+	}
+	known := map[string]bool{model.AuthNone: true}
+	for _, p := range profiles {
+		known[p.ID] = true
+		where := "auth/" + p.ID
+		if strings.HasPrefix(p.Description, "INVALID: ") {
+			report(where, strings.TrimPrefix(p.Description, "INVALID: "))
+			continue
+		}
+		for _, e := range p.Validate() {
+			report(where, e)
+		}
+		seen := map[string]bool{}
+		for _, env := range envs {
+			eff, err := p.ForEnv(env)
+			if err != nil {
+				continue
+			}
+			for _, c := range auth.CertChecks(eff, st.CertsDir()) {
+				msg := fmt.Sprintf("%s (%s): %s %s", c.Label, c.Field, c.Status, c.Detail)
+				if c.Status != "ok" && (c.Required || c.Status != "not_set") && !seen[msg] {
+					seen[msg] = true
+					if env != "" {
+						msg = "environment " + env + ": " + msg
+					}
+					report(where, msg)
+				}
+			}
+		}
+	}
+	sets, err := st.ListCertSets()
+	if err != nil {
+		die(err)
+	}
+	knownSets := map[string]bool{model.AuthNone: true}
+	for _, c := range sets {
+		knownSets[c.ID] = true
+		where := "tls/" + c.ID
+		if strings.HasPrefix(c.Description, "INVALID: ") {
+			report(where, strings.TrimPrefix(c.Description, "INVALID: "))
+			continue
+		}
+		for _, e := range c.Validate() {
+			report(where, e)
+		}
+		seen := map[string]bool{}
+		for _, env := range envs {
+			for _, ch := range auth.TLSChecks(c.For(env), false, st.CertsDir()) {
+				msg := fmt.Sprintf("%s (%s): %s %s", ch.Label, ch.File, ch.Status, ch.Detail)
+				if ch.Status != "ok" && (ch.Required || ch.Status != "not_set") && !seen[msg] {
+					seen[msg] = true
+					if env != "" {
+						msg = "environment " + env + ": " + msg
+					}
+					report(where, msg)
+				}
+			}
+		}
+	}
+	fmt.Printf("  %d environment(s)%s, %d auth profile(s), %d certificate set(s)\n", len(g.Environments), regionCount(g), len(profiles), len(sets))
+
 	for _, a := range apps {
 		if *only != "" && a.ID != *only {
 			continue
 		}
 		checked++
 		fmt.Printf("%s\n", a.ID)
-		profiles, err := st.ListAuth(a.ID)
-		if err != nil {
-			die(err)
-		}
-		known := map[string]bool{model.AuthNone: true}
-		for _, p := range profiles {
-			known[p.ID] = true
-			where := "auth/" + p.ID
-			if strings.HasPrefix(p.Description, "INVALID: ") {
-				report(where, strings.TrimPrefix(p.Description, "INVALID: "))
-				continue
-			}
-			for _, e := range p.Validate() {
-				report(where, e)
-			}
-			for _, c := range auth.CertChecks(&p, st.AssetDir(a.ID, "certs")) {
-				if c.Status != "ok" && (c.Required || c.Status != "not_set") {
-					report(where, fmt.Sprintf("%s (%s): %s %s", c.Label, c.Field, c.Status, c.Detail))
-				}
-			}
-		}
-		// Certificate sets, checked for every environment of the application.
-		sets, err := st.ListCertSets(a.ID)
-		if err != nil {
-			die(err)
-		}
-		knownSets := map[string]bool{model.AuthNone: true}
-		envs := []string{""}
-		for e := range a.Environments {
-			envs = append(envs, e)
-		}
-		sort.Strings(envs)
-		for _, c := range sets {
-			knownSets[c.ID] = true
-			where := "tls/" + c.ID
-			if strings.HasPrefix(c.Description, "INVALID: ") {
-				report(where, strings.TrimPrefix(c.Description, "INVALID: "))
-				continue
-			}
-			for _, e := range c.Validate() {
-				report(where, e)
-			}
-			seen := map[string]bool{}
-			for _, env := range envs {
-				for _, ch := range auth.TLSChecks(c.For(env), false, st.AssetDir(a.ID, "certs")) {
-					msg := fmt.Sprintf("%s (%s): %s %s", ch.Label, ch.File, ch.Status, ch.Detail)
-					if ch.Status != "ok" && (ch.Required || ch.Status != "not_set") && !seen[msg] {
-						seen[msg] = true
-						if env != "" {
-							msg = "environment " + env + ": " + msg
-						}
-						report(where, msg)
-					}
-				}
-			}
-		}
 		if a.DefaultAuth != "" && !known[a.DefaultAuth] {
-			report("application", "defaultAuth "+a.DefaultAuth+" is not a known auth profile")
+			report("application", "defaultAuth "+a.DefaultAuth+" is not a global auth profile")
 		}
-		if a.DefaultEnvironment != "" {
-			if _, ok := a.Environments[a.DefaultEnvironment]; !ok {
-				report("application", "defaultEnvironment "+a.DefaultEnvironment+" is not defined")
+		if a.DefaultEnvironment != "" && !g.Has(a.DefaultEnvironment) {
+			report("application", "defaultEnvironment "+a.DefaultEnvironment+" is not in the global list ("+strings.Join(g.Keys(), ", ")+")")
+		}
+		for _, d := range []string{"auth", "tls", "certs"} {
+			if left, _ := os.ReadDir(filepath.Join(st.AppDir(a.ID), "assets", d)); len(left) > 0 {
+				report("assets/"+d, "files left from before auth and certificates became global; fix them and run \"testplane migrate\"")
 			}
 		}
 		scs, err := st.ListScenarios(a.ID)
@@ -385,29 +451,17 @@ func validate(args []string) int {
 				}
 			}
 			for _, r := range setRefs {
-				if owner, id, ok := strings.Cut(r, "/"); ok {
-					if _, err := st.GetCertSet(owner, id); err == nil {
-						continue
-					}
-				}
 				if r != "" && !knownSets[r] {
-					report(where, "certificate set "+r+" does not exist")
-					knownSets[r] = true
+					report(where, "certificate set "+r+" does not exist under global")
 				}
 			}
 			for _, r := range refs {
-				if owner, id, ok := strings.Cut(r, "/"); ok {
-					if _, err := st.GetAuth(owner, id); err == nil {
-						continue
-					}
-				}
 				if r != "" && !known[r] {
-					report(where, "auth profile "+r+" does not exist")
-					known[r] = true
+					report(where, "auth profile "+r+" does not exist under global")
 				}
 			}
 		}
-		fmt.Printf("  %d scenario(s), %d test(s), %d auth profile(s), %d certificate set(s)\n", len(scs), tests, len(profiles), len(sets))
+		fmt.Printf("  %d scenario(s), %d test(s)\n", len(scs), tests)
 	}
 	if checked == 0 {
 		fmt.Fprintln(os.Stderr, "error: no application found in", *ws)
@@ -421,11 +475,18 @@ func validate(args []string) int {
 	return 0
 }
 
+func regionCount(g *model.Global) string {
+	if len(g.Regions) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" x %d region(s)", len(g.Regions))
+}
+
 func list(args []string) {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	ws := workspaceFlag(fs)
 	_ = fs.Parse(args)
-	st := store.New(*ws)
+	st := openStore(*ws)
 	apps, err := st.ListApps()
 	if err != nil {
 		die(err)
@@ -446,14 +507,14 @@ func exportCmd(args []string) int {
 	fs := flag.NewFlagSet("export", flag.ExitOnError)
 	ws := workspaceFlag(fs)
 	app := fs.String("app", "", "application id (required)")
-	scenario := fs.String("scenario", "", "export this scenario with the auth profiles and certificate sets it uses, as YAML (default: the whole application as a zip)")
+	scenario := fs.String("scenario", "", "export this scenario with the global auth profiles and certificate sets it uses, as YAML (default: the whole application as a zip)")
 	out := fs.String("out", "", "file to write (default: <scenario>.scenario.yaml or <app>.zip; - for standard output)")
 	_ = fs.Parse(args)
 	if *app == "" {
 		fmt.Fprintln(os.Stderr, "error: --app is required")
 		return 2
 	}
-	st := store.New(*ws)
+	st := openStore(*ws)
 	var data []byte
 	var err error
 	name := *app + ".zip"
@@ -499,7 +560,7 @@ func importCmd(args []string) int {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 2
 	}
-	st := store.New(*ws)
+	st := openStore(*ws)
 	if bytes.HasPrefix(data, []byte("PK")) {
 		id, err := st.ImportApp(data)
 		if err != nil {
@@ -537,16 +598,12 @@ func runDemo(args []string) {
 	grpcAddr := fs.String("grpc", "127.0.0.1:8090", "gRPC address")
 	mtlsAddr := fs.String("mtls", "127.0.0.1:8091", "mTLS HTTPS address (empty to disable)")
 	grpcTLSAddr := fs.String("grpc-mtls", "127.0.0.1:8092", "mTLS gRPC address (empty to disable)")
-	ws := fs.String("workspace", "", "write demo client certificates into the example applications of this workspace")
+	ws := fs.String("workspace", "", "write demo client certificates into this workspace (global/certs)")
 	_ = fs.Parse(args)
 	var certs []string
 	if *ws != "" {
-		st := store.New(*ws)
-		for _, app := range []string{"orders-demo", "sample-config"} {
-			if _, err := st.GetApp(app); err == nil {
-				certs = append(certs, st.AssetDir(app, "certs"))
-			}
-		}
+		// Certificate files are global: one copy serves every application.
+		certs = append(certs, openStore(*ws).CertsDir())
 	}
 	die(demo.Run(*httpAddr, *grpcAddr, *mtlsAddr, *grpcTLSAddr, certs))
 }

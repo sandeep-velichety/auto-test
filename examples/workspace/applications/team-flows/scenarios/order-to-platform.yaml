@@ -1,12 +1,12 @@
 id: order-to-platform
 name: Order flow across services
-description: Creates an order through the orders service, then checks the platform services, using the orders-demo application's auth profiles and addresses.
+description: Creates an order through the orders service, then checks the platform services, using global auth profiles and the orders-demo application's addresses.
 tags: [flow]
 tests:
   - id: create-order
     name: Create an order in the orders service
     type: http
-    auth: orders-demo/orders-oauth          # profile owned by another application
+    auth: orders-oauth          # a global auth profile: any application can use it
     http:
       method: POST
       url: "{{orders-demo.baseUrl}}/orders"  # that application's environment value
@@ -20,7 +20,7 @@ tests:
     variants:
       - id: stale-token
         name: Rejected with a stale token
-        auth: orders-demo/expired-token
+        auth: expired-token
         expect:
           status: 401
 
@@ -42,7 +42,7 @@ tests:
   - id: secure-ping
     name: Secure endpoint accepts the orders client certificate
     type: http
-    auth: orders-demo/demo-mtls
+    auth: demo-mtls
     http:
       method: GET
       url: "{{orders-demo.secureUrl}}/secure/ping"
@@ -50,7 +50,7 @@ tests:
   - id: order-still-there
     name: The order is readable at the end of the flow
     type: http
-    auth: orders-demo/orders-oauth
+    auth: orders-oauth
     http:
       method: GET
       url: "{{orders-demo.baseUrl}}/orders/{{orderId}}"

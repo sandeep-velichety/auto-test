@@ -23,13 +23,13 @@ func bundleFixture(t *testing.T) *Store {
 	must(s.SaveApp(&model.Application{ID: "shop", Name: "Shop", DefaultEnvironment: "dev", DefaultAuth: "fallback",
 		Environments: map[string]map[string]string{"dev": {"baseUrl": "http://x", "secureHost": "x:8443"}}}))
 	certs, _ := demo.NewCerts()
-	must(certs.WriteClientFiles(s.AssetDir("shop", "certs")))
-	must(s.SaveAuth("shop", &model.AuthProfile{ID: "token", Type: model.AuthOAuth2ClientCredentials, OAuth2: &model.OAuth2Auth{TokenURL: "{{idpUrl}}/token", ClientID: "c", ClientSecret: "hunter2"}}))
-	must(s.SaveAuth("shop", &model.AuthProfile{ID: "fallback", Type: model.AuthBearer, Bearer: &model.BearerAuth{Token: "{{$env.TOKEN}}"}}))
-	must(s.SaveAuth("shop", &model.AuthProfile{ID: "unused", Type: model.AuthBasic, Basic: &model.BasicAuth{Username: "u", Password: "pw"}}))
-	must(s.SaveCertSet("shop", &model.CertSet{ID: "client", Cert: "demo-client.crt", Key: "demo-client.key", CA: "demo-ca.crt", Environments: map[string]model.TLSSettings{"stg": {Cert: "stg.crt", Key: "stg.key"}}}))
-	must(s.SaveCertSet("shop", &model.CertSet{ID: "by-host", Hosts: []string{"{{secureHost}}"}, CA: "demo-ca.crt"}))
-	must(s.SaveCertSet("shop", &model.CertSet{ID: "unused-set", CA: "demo-ca.crt"}))
+	must(certs.WriteClientFiles(s.CertsDir()))
+	must(s.SaveAuth(&model.AuthProfile{ID: "token", Type: model.AuthOAuth2ClientCredentials, OAuth2: &model.OAuth2Auth{TokenURL: "{{idpUrl}}/token", ClientID: "c", ClientSecret: "hunter2"}}))
+	must(s.SaveAuth(&model.AuthProfile{ID: "fallback", Type: model.AuthBearer, Bearer: &model.BearerAuth{Token: "{{$env.TOKEN}}"}}))
+	must(s.SaveAuth(&model.AuthProfile{ID: "unused", Type: model.AuthBasic, Basic: &model.BasicAuth{Username: "u", Password: "pw"}}))
+	must(s.SaveCertSet(&model.CertSet{ID: "client", Cert: "demo-client.crt", Key: "demo-client.key", CA: "demo-ca.crt", Environments: map[string]model.TLSSettings{"stg": {Cert: "stg.crt", Key: "stg.key"}}}))
+	must(s.SaveCertSet(&model.CertSet{ID: "by-host", Hosts: []string{"{{secureHost}}"}, CA: "demo-ca.crt"}))
+	must(s.SaveCertSet(&model.CertSet{ID: "unused-set", CA: "demo-ca.crt"}))
 	must(s.SaveScenario("shop", &model.Scenario{ID: "flow", Name: "Flow", Variables: map[string]string{"item": "x-{{$uuid}}"}, Tests: []model.Test{
 		{ID: "create", Name: "Create", Type: model.TypeHTTP, Auth: "token", MTLS: "client", HTTP: &model.HTTPStep{URL: "{{baseUrl}}/orders/{{item}}"}, Capture: map[string]string{"orderId": "id"},
 			Variants: []model.Variant{{ID: "other", Name: "Other", Auth: "team/shared", MTLS: "none"}}},
@@ -91,7 +91,7 @@ func TestImportScenarioBundleAndPlainYAML(t *testing.T) {
 	dst := New(t.TempDir())
 	_ = dst.SaveApp(&model.Application{ID: "orders", Name: "Orders", DefaultEnvironment: "dev", Environments: map[string]map[string]string{"dev": {"baseUrl": "http://y"}}})
 	// The receiver already has its own "token" profile: it must be kept.
-	_ = dst.SaveAuth("orders", &model.AuthProfile{ID: "token", Type: model.AuthBearer, Bearer: &model.BearerAuth{Token: "mine"}})
+	_ = dst.SaveAuth(&model.AuthProfile{ID: "token", Type: model.AuthBearer, Bearer: &model.BearerAuth{Token: "mine"}})
 
 	res, err := dst.ImportScenario("orders", raw, false)
 	if err != nil {
@@ -112,13 +112,15 @@ func TestImportScenarioBundleAndPlainYAML(t *testing.T) {
 	if strings.Contains(missing, "variable baseUrl") {
 		t.Errorf("baseUrl is defined by the receiver: %s", missing)
 	}
-	if p, _ := dst.GetAuth("orders", "token"); p.Bearer == nil || p.Bearer.Token != "mine" {
+	if p, _ := dst.GetAuth("token"); p.Bearer == nil || p.Bearer.Token != "mine" {
 		t.Fatal("an existing profile must never be overwritten by an import")
 	}
-	if sc, err := dst.GetScenario("orders", "flow"); err != nil || len(sc.Tests) != 3 || sc.Tests[0].Variants[0].Auth != "team/shared" {
+	if sc, err := dst.GetScenario("orders", "flow"); err != nil || len(sc.Tests) != 3 || sc.Tests[0].Variants[0].Auth != "shared" {
+		// "team/shared" is how older files named another application's
+		// profile; auth is global now, so the prefix is dropped on import.
 		t.Fatalf("scenario after import: %+v %v", sc, err)
 	}
-	if c, err := dst.GetCertSet("orders", "client"); err != nil || c.Environments["stg"].Cert != "stg.crt" {
+	if c, err := dst.GetCertSet("client"); err != nil || c.Environments["stg"].Cert != "stg.crt" {
 		t.Fatalf("certificate set after import: %+v %v", c, err)
 	}
 
@@ -147,7 +149,7 @@ func TestImportScenarioBundleAndPlainYAML(t *testing.T) {
 			t.Errorf("%s: want ErrInvalid, got %v", name, err)
 		}
 	}
-	if list, _ := fresh.ListAuth("a"); len(list) != 0 {
+	if list, _ := fresh.ListAuth(); len(list) != 0 {
 		t.Errorf("a rejected import must create nothing: %+v", list)
 	}
 	if _, err := fresh.ImportScenario("ghost", plain, false); !errors.Is(err, ErrNotFound) {

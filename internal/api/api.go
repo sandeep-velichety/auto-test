@@ -48,6 +48,13 @@ type authView struct {
 	CertChecks []auth.Check `json:"certChecks,omitempty"`
 }
 
+type globalView struct {
+	model.Global
+	// Keys are the targets a run can choose: environments, or
+	// environment/region pairs.
+	Keys []string `json:"keys"`
+}
+
 type certSetView struct {
 	model.CertSet
 	// Checks describe the files used in the environment asked for.
@@ -244,8 +251,8 @@ func (s *Server) Handler() http.Handler {
 		}
 		w.WriteHeader(204)
 	})
-	// The whole scenario in one file: the scenario plus the auth profiles
-	// and certificate sets it uses.
+	// The whole scenario in one file: the scenario plus the global auth
+	// profiles and certificate sets it uses.
 	mux.HandleFunc("GET /api/apps/{app}/scenarios/{id}/export", func(w http.ResponseWriter, r *http.Request) {
 		b, err := st.ExportScenario(r.PathValue("app"), r.PathValue("id"))
 		if err != nil {
@@ -315,34 +322,64 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, 200, sc)
 	})
 
-	// auth profiles
+	// ---- global: environments, auth, certificates (shared by every application) ----
+
+	mux.HandleFunc("GET /api/global", func(w http.ResponseWriter, r *http.Request) {
+		g, err := st.GetGlobal()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, globalView{Global: *g, Keys: g.Keys()})
+	})
+	mux.HandleFunc("PUT /api/global", func(w http.ResponseWriter, r *http.Request) {
+		var g model.Global
+		if err := decode(r, &g); err != nil {
+			fail(w, err)
+			return
+		}
+		if err := st.SaveGlobal(&g); err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, globalView{Global: g, Keys: g.Keys()})
+	})
+	// Which scenarios use each auth profile and certificate set.
+	mux.HandleFunc("GET /api/global/usage", func(w http.ResponseWriter, r *http.Request) {
+		u, err := st.Usage()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, u)
+	})
+
 	// envOf returns the environment a request is about (?env=, else the
-	// application's default).
+	// global default).
 	envOf := func(r *http.Request) string {
 		if e := r.URL.Query().Get("env"); e != "" {
 			return e
 		}
-		if a, err := st.GetApp(r.PathValue("app")); err == nil {
-			return a.DefaultEnvironment
+		if g, err := st.GetGlobal(); err == nil {
+			return g.DefaultEnvironment
 		}
 		return ""
 	}
-	view := func(app, env string, p model.AuthProfile) authView {
+	view := func(env string, p model.AuthProfile) authView {
 		eff, err := p.ForEnv(env)
 		if err != nil {
 			eff = &p
 		}
 		// Stored secrets are write-only: they go out masked.
-		return authView{AuthProfile: p.Masked(), CertChecks: auth.CertChecks(eff, st.AssetDir(app, "certs"))}
+		return authView{AuthProfile: p.Masked(), CertChecks: auth.CertChecks(eff, st.CertsDir())}
 	}
-	setView := func(app, env string, c model.CertSet) certSetView {
-		return certSetView{CertSet: c, Checks: auth.TLSChecks(c.For(env), false, st.AssetDir(app, "certs"))}
+	setView := func(env string, c model.CertSet) certSetView {
+		return certSetView{CertSet: c, Checks: auth.TLSChecks(c.For(env), false, st.CertsDir())}
 	}
 
 	// certificate sets
-	mux.HandleFunc("GET /api/apps/{app}/tls", func(w http.ResponseWriter, r *http.Request) {
-		app := r.PathValue("app")
-		list, err := st.ListCertSets(app)
+	mux.HandleFunc("GET /api/global/tls", func(w http.ResponseWriter, r *http.Request) {
+		list, err := st.ListCertSets()
 		if err != nil {
 			fail(w, err)
 			return
@@ -350,34 +387,34 @@ func (s *Server) Handler() http.Handler {
 		env := envOf(r)
 		out := make([]certSetView, 0, len(list))
 		for _, c := range list {
-			out = append(out, setView(app, env, c))
+			out = append(out, setView(env, c))
 		}
 		writeJSON(w, 200, out)
 	})
-	mux.HandleFunc("PUT /api/apps/{app}/tls/{id}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("PUT /api/global/tls/{id}", func(w http.ResponseWriter, r *http.Request) {
 		var c model.CertSet
 		if err := decode(r, &c); err != nil {
 			fail(w, err)
 			return
 		}
 		c.ID = r.PathValue("id")
-		if err := st.SaveCertSet(r.PathValue("app"), &c); err != nil {
+		if err := st.SaveCertSet(&c); err != nil {
 			fail(w, err)
 			return
 		}
-		writeJSON(w, 200, setView(r.PathValue("app"), envOf(r), c))
+		writeJSON(w, 200, setView(envOf(r), c))
 	})
-	mux.HandleFunc("DELETE /api/apps/{app}/tls/{id}", func(w http.ResponseWriter, r *http.Request) {
-		if err := st.DeleteCertSet(r.PathValue("app"), r.PathValue("id")); err != nil {
+	mux.HandleFunc("DELETE /api/global/tls/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if err := st.DeleteCertSet(r.PathValue("id")); err != nil {
 			fail(w, err)
 			return
 		}
 		w.WriteHeader(204)
 	})
 
-	mux.HandleFunc("GET /api/apps/{app}/auth", func(w http.ResponseWriter, r *http.Request) {
-		app := r.PathValue("app")
-		list, err := st.ListAuth(app)
+	// auth profiles
+	mux.HandleFunc("GET /api/global/auth", func(w http.ResponseWriter, r *http.Request) {
+		list, err := st.ListAuth()
 		if err != nil {
 			fail(w, err)
 			return
@@ -385,11 +422,11 @@ func (s *Server) Handler() http.Handler {
 		env := envOf(r)
 		out := make([]authView, 0, len(list))
 		for _, p := range list {
-			out = append(out, view(app, env, p))
+			out = append(out, view(env, p))
 		}
 		writeJSON(w, 200, out)
 	})
-	mux.HandleFunc("PUT /api/apps/{app}/auth/{id}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("PUT /api/global/auth/{id}", func(w http.ResponseWriter, r *http.Request) {
 		var p model.AuthProfile
 		if err := decode(r, &p); err != nil {
 			fail(w, err)
@@ -397,26 +434,28 @@ func (s *Server) Handler() http.Handler {
 		}
 		p.ID = r.PathValue("id")
 		// A masked value coming back means "leave the stored secret alone".
-		old, _ := st.GetAuth(r.PathValue("app"), p.ID)
+		old, _ := st.GetAuth(p.ID)
 		p.KeepSecrets(old)
-		if err := st.SaveAuth(r.PathValue("app"), &p); err != nil {
+		if err := st.SaveAuth(&p); err != nil {
 			fail(w, err)
 			return
 		}
-		writeJSON(w, 200, view(r.PathValue("app"), envOf(r), p))
+		writeJSON(w, 200, view(envOf(r), p))
 	})
-	mux.HandleFunc("DELETE /api/apps/{app}/auth/{id}", func(w http.ResponseWriter, r *http.Request) {
-		if err := st.DeleteAuth(r.PathValue("app"), r.PathValue("id")); err != nil {
+	mux.HandleFunc("DELETE /api/global/auth/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if err := st.DeleteAuth(r.PathValue("id")); err != nil {
 			fail(w, err)
 			return
 		}
 		w.WriteHeader(204)
 	})
 	// Try a profile for real: load its certificates and fetch its token.
-	mux.HandleFunc("POST /api/apps/{app}/auth/{id}/check", func(w http.ResponseWriter, r *http.Request) {
+	// ?app= fills the profile's variables with that application's values.
+	mux.HandleFunc("POST /api/global/auth/{id}/check", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
 		defer cancel()
-		res, err := s.Engine.CheckAuth(ctx, r.PathValue("app"), r.PathValue("id"), r.URL.Query().Get("env"), r.URL.Query().Get("mtls"))
+		q := r.URL.Query()
+		res, err := s.Engine.CheckAuth(ctx, q.Get("app"), r.PathValue("id"), q.Get("env"), q.Get("mtls"))
 		if err != nil {
 			fail(w, err)
 			return
@@ -424,24 +463,48 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, 200, res)
 	})
 
-	// asset files
-	mux.HandleFunc("GET /api/apps/{app}/assets", func(w http.ResponseWriter, r *http.Request) {
-		list, err := st.ListAssets(r.PathValue("app"))
+	// certificate and key files
+	mux.HandleFunc("GET /api/global/certs", func(w http.ResponseWriter, r *http.Request) {
+		list, err := st.ListCerts()
 		if err != nil {
 			fail(w, err)
 			return
 		}
 		writeJSON(w, 200, list)
 	})
-	mux.HandleFunc("PUT /api/apps/{app}/assets/{category}/{name}", func(w http.ResponseWriter, r *http.Request) {
-		if err := st.SaveAsset(r.PathValue("app"), r.PathValue("category"), r.PathValue("name"), r.Body); err != nil {
+	mux.HandleFunc("PUT /api/global/certs/{name}", func(w http.ResponseWriter, r *http.Request) {
+		if err := st.SaveCert(r.PathValue("name"), r.Body); err != nil {
 			fail(w, err)
 			return
 		}
 		w.WriteHeader(204)
 	})
-	mux.HandleFunc("DELETE /api/apps/{app}/assets/{category}/{name}", func(w http.ResponseWriter, r *http.Request) {
-		if err := st.DeleteAsset(r.PathValue("app"), r.PathValue("category"), r.PathValue("name")); err != nil {
+	mux.HandleFunc("DELETE /api/global/certs/{name}", func(w http.ResponseWriter, r *http.Request) {
+		if err := st.DeleteCert(r.PathValue("name")); err != nil {
+			fail(w, err)
+			return
+		}
+		w.WriteHeader(204)
+	})
+
+	// an application's .proto files
+	mux.HandleFunc("GET /api/apps/{app}/protos", func(w http.ResponseWriter, r *http.Request) {
+		list, err := st.ListProtos(r.PathValue("app"))
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, list)
+	})
+	mux.HandleFunc("PUT /api/apps/{app}/protos/{name}", func(w http.ResponseWriter, r *http.Request) {
+		if err := st.SaveProto(r.PathValue("app"), r.PathValue("name"), r.Body); err != nil {
+			fail(w, err)
+			return
+		}
+		w.WriteHeader(204)
+	})
+	mux.HandleFunc("DELETE /api/apps/{app}/protos/{name}", func(w http.ResponseWriter, r *http.Request) {
+		if err := st.DeleteProto(r.PathValue("app"), r.PathValue("name")); err != nil {
 			fail(w, err)
 			return
 		}

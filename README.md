@@ -1,11 +1,11 @@
 # Testplane
 
-A scenario-based test tool any team can plug its applications into. Testers describe an application once (environments, auth profiles, certificates), then build scenarios out of ordered tests. A test is an HTTP call, a gRPC call, a Kafka produce or consume, a Mongo check, a Postgres check or a search of the service's logs in Datadog. Everything is stored as YAML in one folder per application, so it can be reviewed, versioned and handed to another team.
+A scenario-based test tool any team can plug its applications into. Auth profiles, certificates and the list of environments and regions are set up once, globally, and every application and every tester uses the same ones. Testers then describe each application (its addresses per environment) and build scenarios out of ordered tests. A test is an HTTP call, a gRPC call, a Kafka produce or consume, a Mongo check, a Postgres check or a search of the service's logs in Datadog. Everything is stored as YAML: one `global` folder and one folder per application, so it can be reviewed, versioned and handed to another team.
 
 Two pieces:
 
 - **Backend** (Go, one binary): runs the tests. It works on its own from a terminal or a CI/CD pipeline and also serves a REST API.
-- **Front end** (React): create applications, auth profiles and scenarios, run them and read the results. It is embedded in the binary.
+- **Front end** (React): set up global auth and certificates, create applications and scenarios, run them and read the results. It is embedded in the binary.
 
 ## Prerequisites
 
@@ -105,7 +105,7 @@ TESTPLANE_TOKEN=choose-a-long-random-value \
 
 Keep one application per service for service-level tests, and add a "team" application for scenarios that follow a business flow through several services. Inside any scenario:
 
-- `auth: orders/orders-oauth` uses the auth profile (and certificates) of the `orders` application.
+- `auth: orders-oauth` uses that auth profile. Auth profiles and certificate sets are global, so any application's test names them by id.
 - `{{orders.baseUrl}}` reads a value from the `orders` application's environment.
 
 A flow can then call service A, check service B's database, wait for an event and confirm what the service logged. `examples/workspace/applications/team-flows` shows the pattern.
@@ -132,31 +132,34 @@ The keys are read from the backend's environment and are masked in stored result
 
 ```
 workspace/
+  global/                       shared by every application
+    settings.yaml               the environments and regions, and shared values
+    auth/orders-oauth.yaml      one file per auth profile
+    tls/client.yaml             one file per certificate set (which files to present for mutual TLS)
+    certs/client.crt            the certificate and key files themselves
   applications/
     orders-demo/
-      application.yaml          name, environments, default auth
-      assets/
-        auth/orders-oauth.yaml  one file per auth profile
-        tls/client.yaml         one file per certificate set (which files to present for mutual TLS)
-        certs/client.crt        the certificate and key files themselves
-        protos/orders.proto     optional .proto files for gRPC
+      application.yaml          name, its own values per environment, default auth
+      assets/protos/orders.proto   optional .proto files for gRPC
       scenarios/
         order-lifecycle.yaml    one file per scenario
 ```
 
-Assets sit next to the application that uses them. To share an application, copy its folder or use "Download as zip" in the UI (private keys are left out of the zip).
+To share an application, use "Download as zip" in the UI: the zip holds the application plus a copy of the global auth profiles and certificates its scenarios use (private keys are left out). Importing it elsewhere adds those to that workspace's `global` folder, and never overwrites one that is already there.
+
+**Workspaces from before auth became global** kept auth, certificate sets and certificate files inside each application (`assets/auth`, `assets/tls`, `assets/certs`). They are moved to `global/` automatically the first time the workspace is opened by `serve`, `run` or `validate`, or on demand with `testplane migrate --workspace DIR`, which prints every change. Ids keep their names; where two applications used the same id for different things, the second becomes `<application>-<id>` and the scenarios that used it are updated. Variables a profile took from its application (`{{baseUrl}}`) become `{{<application>.baseUrl}}`, so the profile means the same whichever application uses it.
 
 ## Concepts
 
-**Application.** One system under test. Its environments are sets of variables such as `baseUrl` or `postgresDsn`; tests refer to them as `{{baseUrl}}`, so the same scenarios run against any environment.
+**Application.** One system under test. For each environment it holds its own variables such as `baseUrl` or `postgresDsn`; tests refer to them as `{{baseUrl}}`, so the same scenarios run against any environment.
 
-**Everything is per application and per environment.** Each application owns its certificate files, certificate sets, auth profiles and environments. Certificate sets and auth profiles can hold different values for each environment (staging's client id, production's certificate), so one scenario runs anywhere.
+**Global.** Auth profiles, certificate sets, certificate files and the list of environments and regions do not belong to an application. They live under **Global** in the sidebar (`global/` on disk), are set up once, and every application and everyone connected to the backend uses the same ones. Because auth depends on where you run, each auth profile and certificate set holds its values per environment and region (stage/NA's client id, prod/AU's certificate); a run picks the right ones automatically. The Global page shows where each one is used, so you know what a change or delete touches.
 
-**Environments and regions.** New applications start with the environments `stage`, `qa` and `prod` in the regions `NA` and `AU`. Every environment and region pair (stage in NA, stage in AU, …) has its own complete set of values, and a run picks one pair: two pickers in the UI, or `--env stage --region AU` on the command line. Under "Environments & settings" you can add an environment (created in every region) or a region (created for every environment); a new one starts as a copy of an existing one for you to edit. Auth profiles and certificate sets can differ by environment, by region or by one specific pair. Applications without regions keep working with plain environment names.
+**Environments and regions.** There is one list for the whole workspace, under Global, "Environments & regions". A new workspace starts with the environments `stage`, `qa` and `prod` in the regions `NA` and `AU`; add or remove either there. A run picks one environment and region pair: two pickers in the UI, or `--env stage --region AU` on the command line. Each application fills in its own values for every pair under its "Environments & settings". Global "shared values" are variables every application and auth profile can use (for example the identity provider's address per environment). Auth profiles and certificate sets can differ by environment, by region or by one specific pair. A list without regions works with plain environment names.
 
-**Deleting an application.** "Delete application" is under the application's name at the top of the page (and at the bottom of "Environments & settings"). It asks for confirmation and removes the application's scenarios, auth profiles, certificates and run history.
+**Deleting an application.** "Delete application" is under the application's name at the top of the page (and at the bottom of "Environments & settings"). It asks for confirmation and removes the application's scenarios and run history. Global auth and certificates are not touched.
 
-**Certificate set.** A named group of files for mutual TLS: client certificate, private key and, for a private CA, the CA bundle. You configure it once per application. A test then says whether mutual TLS is needed (`mtls: <set>`, or `mtls: none`). As in Postman, a set can also list hosts, and is then presented automatically on calls to those hosts. The editor shows which files are needed and whether each is uploaded, matching and unexpired; `testplane validate` reports the same for every environment.
+**Certificate set.** A named group of files for mutual TLS: client certificate, private key and, for a private CA, the CA bundle. You configure it once, globally. A test of any application then says whether mutual TLS is needed (`mtls: <set>`, or `mtls: none`). As in Postman, a set can also list hosts, and is then presented automatically on any application's calls to those hosts. The editor shows which files are needed and whether each is uploaded, matching and unexpired; `testplane validate` reports the same for every environment.
 
 **Auth profile.** How a test gets its credentials, chosen per test or inherited from the scenario, then the application:
 

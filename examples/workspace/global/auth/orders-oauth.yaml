@@ -3,7 +3,7 @@ name: Orders OAuth2 client
 description: Client-credentials token from the demo token endpoint.
 type: oauth2_client_credentials
 oauth2:
-  tokenUrl: "{{baseUrl}}/oauth/token"
+  tokenUrl: "{{orders-demo.baseUrl}}/oauth/token"
   clientId: demo-client
   # In a real workspace keep secrets out of the file: clientSecret: "{{$env.ORDERS_CLIENT_SECRET}}"
   clientSecret: demo-secret

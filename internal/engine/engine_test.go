@@ -51,15 +51,15 @@ func fixture(t *testing.T) (*Engine, *store.Store) {
 			"other": {"baseUrl": "http://127.0.0.1:1"},
 		}}
 	must(t, st.SaveApp(app))
-	must(t, certs.WriteClientFiles(st.AssetDir("shop", "certs")))
-	must(t, st.SaveAuth("shop", &model.AuthProfile{ID: "oauth", Type: model.AuthOAuth2ClientCredentials,
-		OAuth2: &model.OAuth2Auth{TokenURL: "{{baseUrl}}/oauth/token", ClientID: demo.ClientID, ClientSecret: demo.ClientSecret}}))
-	must(t, st.SaveAuth("shop", &model.AuthProfile{ID: "bad-secret", Type: model.AuthOAuth2ClientCredentials,
+	must(t, certs.WriteClientFiles(st.CertsDir()))
+	must(t, st.SaveAuth(&model.AuthProfile{ID: "oauth", Type: model.AuthOAuth2ClientCredentials,
+		OAuth2: &model.OAuth2Auth{TokenURL: "{{shop.baseUrl}}/oauth/token", ClientID: demo.ClientID, ClientSecret: demo.ClientSecret}}))
+	must(t, st.SaveAuth(&model.AuthProfile{ID: "bad-secret", Type: model.AuthOAuth2ClientCredentials,
 		OAuth2: &model.OAuth2Auth{TokenURL: "{{baseUrl}}/oauth/token", ClientID: demo.ClientID, ClientSecret: "nope"}}))
-	must(t, st.SaveAuth("shop", &model.AuthProfile{ID: "stale", Type: model.AuthBearer, Bearer: &model.BearerAuth{Token: "stale"}}))
-	must(t, st.SaveAuth("shop", &model.AuthProfile{ID: "mtls", Type: model.AuthMTLS,
+	must(t, st.SaveAuth(&model.AuthProfile{ID: "stale", Type: model.AuthBearer, Bearer: &model.BearerAuth{Token: "stale"}}))
+	must(t, st.SaveAuth(&model.AuthProfile{ID: "mtls", Type: model.AuthMTLS,
 		TLS: &model.TLSSettings{Cert: "demo-client.crt", Key: "demo-client.key", CA: "demo-ca.crt"}}))
-	must(t, st.SaveAuth("shop", &model.AuthProfile{ID: "ca-only", Type: model.AuthNone, TLS: &model.TLSSettings{CA: "demo-ca.crt"}}))
+	must(t, st.SaveAuth(&model.AuthProfile{ID: "ca-only", Type: model.AuthNone, TLS: &model.TLSSettings{CA: "demo-ca.crt"}}))
 	return New(st), st
 }
 

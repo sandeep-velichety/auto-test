@@ -25,7 +25,7 @@ import (
 // Options selects what to run.
 type Options struct {
 	App       string
-	Env       string            // empty = the application's default environment
+	Env       string            // environment or environment/region; empty = the application's default, else the global default
 	Scenarios []string          // empty = all
 	Tags      []string          // any-of filter on scenario tags
 	Kind      string            // "", positive (skip negative cases) or negative (skip positive variants)
@@ -49,45 +49,9 @@ func (e *Engine) Run(ctx context.Context, o Options) (*model.RunResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("application %q: %w", o.App, err)
 	}
-	envName := o.Env
-	if envName == "" {
-		envName = app.DefaultEnvironment
-	}
-	base := map[string]string{}
-	if envName != "" {
-		env, ok := app.Environments[envName]
-		if !ok {
-			return nil, fmt.Errorf("%w: application %q has no environment %q", store.ErrInvalid, app.ID, envName)
-		}
-		for k, v := range env {
-			base[k] = v
-		}
-	}
-	// {{$environment}} and {{$region}} name what is being run, so a URL can
-	// be written once, e.g. https://api.{{$region}}.{{$environment}}.example.com
-	if name, region, ok := strings.Cut(envName, "/"); ok {
-		base["$environment"], base["$region"] = name, region
-	} else {
-		base["$environment"], base["$region"] = envName, ""
-	}
-	// Other applications' environment values are visible as {{app-id.name}},
-	// so a flow scenario can call several services. Each one contributes the
-	// environment with the same name, or else its own default.
-	appEnv := map[string]map[string]string{app.ID: copyVars(base)}
-	if others, err := e.Store.ListApps(); err == nil {
-		for _, o := range others {
-			if o.ID == app.ID {
-				continue
-			}
-			env, ok := o.Environments[envName]
-			if !ok {
-				env = o.Environments[o.DefaultEnvironment]
-			}
-			appEnv[o.ID] = copyVars(env)
-			for k, v := range env {
-				base[o.ID+"."+k] = v
-			}
-		}
+	envName, base, err := e.environment(app, o.Env)
+	if err != nil {
+		return nil, err
 	}
 	all, err := e.Store.ListScenarios(app.ID)
 	if err != nil {
@@ -121,7 +85,7 @@ func (e *Engine) Run(ctx context.Context, o Options) (*model.RunResult, error) {
 		Application: app.ID, Environment: envName, StartedAt: start.UTC(), TriggeredBy: o.By, Source: o.Source,
 		Status: model.StatusPassed, Scenarios: []model.ScenarioResult{},
 	}
-	shared := &runShared{store: e.Store, appEnv: appEnv, env: envName, resolver: auth.NewResolver("")}
+	shared := &runShared{env: envName, resolver: auth.NewResolver(e.Store.CertsDir())}
 	for i := range selected {
 		sr := e.runScenario(ctx, app, &selected[i], base, shared, o)
 		run.Scenarios = append(run.Scenarios, sr)
@@ -152,12 +116,62 @@ func copyVars(m map[string]string) map[string]string {
 	return out
 }
 
-// runShared is state kept for a whole run: the credential resolver (so
-// tokens are fetched once), the environment being run and every
-// application's environment values.
+// environment resolves which environment a run targets and collects its
+// variables. The list of environments is global; values come from three
+// places, later ones winning:
+//
+//  1. global values, shared by every application
+//  2. the application's own values
+//  3. every application's values as {{app-id.name}}, so a flow scenario can
+//     call several services and a shared auth profile can point at the
+//     service that issues its tokens
+//
+// {{$environment}} and {{$region}} name what is being run, so a URL can be
+// written once, e.g. https://api.{{$region}}.{{$environment}}.example.com
+func (e *Engine) environment(app *model.Application, envName string) (string, map[string]string, error) {
+	g, err := e.Store.GetGlobal()
+	if err != nil {
+		return "", nil, err
+	}
+	if envName == "" {
+		envName = app.DefaultEnvironment
+	}
+	if envName == "" {
+		envName = g.DefaultEnvironment
+	}
+	if envName != "" && !g.Has(envName) {
+		return "", nil, fmt.Errorf("%w: there is no environment %q; the global list has %s", store.ErrInvalid, envName, strings.Join(g.Keys(), ", "))
+	}
+	base := model.LayeredValues(g.Values, envName)
+	for k, v := range model.LayeredValues(app.Environments, envName) {
+		base[k] = v
+	}
+	if name, region, ok := strings.Cut(envName, "/"); ok {
+		base["$environment"], base["$region"] = name, region
+	} else {
+		base["$environment"], base["$region"] = envName, ""
+	}
+	apps, err := e.Store.ListApps()
+	if err != nil {
+		return "", nil, err
+	}
+	for _, o := range apps {
+		vals := model.LayeredValues(o.Environments, envName)
+		if len(vals) == 0 {
+			// An application with nothing for this environment contributes
+			// its own default one.
+			vals = model.LayeredValues(o.Environments, o.DefaultEnvironment)
+		}
+		for k, v := range vals {
+			base[o.ID+"."+k] = v
+		}
+	}
+	return envName, base, nil
+}
+
+// runShared is state kept for a whole run: the environment being run and
+// the credential resolver (so tokens are fetched once).
 type runShared struct {
-	store    *store.Store
-	appEnv   map[string]map[string]string
 	env      string
 	resolver *auth.Resolver
 }
@@ -193,18 +207,28 @@ type scenarioRun struct {
 	shared  *runShared
 	kafka   *executor.KafkaSession
 	started time.Time
-	sets    []model.CertSet // this application's certificate sets, loaded once
+	sets    []model.CertSet // the global certificate sets, loaded once
 	setsOK  bool
 }
 
-// matchSet finds a certificate set of this application whose host patterns
-// cover the host a step is about to call.
-func (r *scenarioRun) matchSet(host string) string {
+// matchSet finds a certificate set whose host patterns cover the host a
+// step is about to call. Certificate sets are global, so a set registered
+// for a host serves every application that calls it. A profile that names
+// certificate files of its own is the more specific choice and is left
+// alone.
+func (r *scenarioRun) matchSet(host, authID string) string {
 	if host == "" {
 		return ""
 	}
+	if authID != "" && authID != model.AuthNone {
+		if p, err := r.e.Store.GetAuth(authID); err == nil {
+			if eff, err := p.ForEnv(r.shared.env); err == nil && (eff.TLS != nil || eff.Type == model.AuthMTLS) {
+				return ""
+			}
+		}
+	}
 	if !r.setsOK {
-		r.sets, _ = r.e.Store.ListCertSets(r.app.ID)
+		r.sets, _ = r.e.Store.ListCertSets()
 		r.setsOK = true
 	}
 	for _, c := range r.sets {
@@ -417,34 +441,16 @@ func firstSet(values ...string) string {
 	return ""
 }
 
-// owner splits "other-app/id" and returns the variables to render that
-// application's assets with: its own environment values take precedence.
-func (r *scenarioRun) owner(id string) (appID, localID string, vars map[string]string) {
-	appID, localID, vars = r.app.ID, id, r.vars
-	if o, rest, ok := strings.Cut(id, "/"); ok {
-		appID, localID = o, rest
-		if appID != r.app.ID {
-			vars = copyVars(r.vars)
-			for k, v := range r.shared.appEnv[appID] {
-				vars[k] = v
-			}
-		}
-	}
-	return
-}
-
-// credentials combines an auth profile with a certificate set.
+// credentials combines an auth profile with a certificate set. Both are
+// global and are read as they apply in the environment being run.
 //
-// authID is a profile id, "other-app/profile" or "none". mtlsID is a
-// certificate set id, "other-app/set", "none" (present no certificate even
-// if the profile has one) or "" (use whatever the profile carries). Both
-// are read as they apply in the environment being run.
+// authID is a profile id or "none". mtlsID is a certificate set id, "none"
+// (present no certificate even if the profile has one) or "" (use whatever
+// the profile carries).
 func (r *scenarioRun) credentials(ctx context.Context, authID, mtlsID string) (*auth.Credentials, error) {
 	profile := &model.AuthProfile{ID: model.AuthNone, Type: model.AuthNone}
-	certsDir := r.e.Store.AssetDir(r.app.ID, "certs")
 	if authID != model.AuthNone && authID != "" {
-		appID, id, vars := r.owner(authID)
-		stored, err := r.e.Store.GetAuth(appID, id)
+		stored, err := r.e.Store.GetAuth(authID)
 		if err != nil {
 			return nil, fmt.Errorf("auth profile %q: %w", authID, err)
 		}
@@ -456,7 +462,7 @@ func (r *scenarioRun) credentials(ctx context.Context, authID, mtlsID string) (*
 		if err != nil {
 			return nil, err
 		}
-		rd := newRenderer(vars)
+		rd := newRenderer(r.vars)
 		rendered := rd.value(m)
 		if err := rd.err(); err != nil {
 			return nil, fmt.Errorf("auth profile %q: %w", authID, err)
@@ -465,8 +471,7 @@ func (r *scenarioRun) credentials(ctx context.Context, authID, mtlsID string) (*
 		if err := fromMap(rendered, profile); err != nil {
 			return nil, err
 		}
-		profile.ID = id
-		certsDir = r.e.Store.AssetDir(appID, "certs")
+		profile.ID = authID
 	}
 	switch mtlsID {
 	case "":
@@ -476,26 +481,19 @@ func (r *scenarioRun) credentials(ctx context.Context, authID, mtlsID string) (*
 			profile.Type = model.AuthNone
 		}
 	default:
-		appID, id, vars := r.owner(mtlsID)
-		set, err := r.e.Store.GetCertSet(appID, id)
+		set, err := r.e.Store.GetCertSet(mtlsID)
 		if err != nil {
 			return nil, fmt.Errorf("certificate set %q: %w", mtlsID, err)
 		}
 		t := set.For(r.shared.env)
-		rd := newRenderer(vars)
+		rd := newRenderer(r.vars)
 		t.ServerName = rd.str(t.ServerName)
 		if err := rd.err(); err != nil {
 			return nil, fmt.Errorf("certificate set %q: %w", mtlsID, err)
 		}
-		if owner := r.e.Store.AssetDir(appID, "certs"); owner != certsDir && profile.TLS != nil {
-			// Files of the profile and of the set live in different folders;
-			// the set wins, so the profile's own files are not needed.
-			profile.TLS = nil
-		}
 		profile.TLS = t
-		certsDir = r.e.Store.AssetDir(appID, "certs")
 	}
-	return r.shared.resolver.ResolveIn(ctx, profile, certsDir, authID+"|"+mtlsID)
+	return r.shared.resolver.ResolveIn(ctx, profile, r.e.Store.CertsDir(), authID+"|"+mtlsID)
 }
 
 // markKafka notes the end of every topic a consume step will read, before
@@ -562,7 +560,7 @@ func (r *scenarioRun) runOne(ctx context.Context, s spec) model.TestResult {
 	// No explicit choice: use the certificate set registered for this host.
 	mtlsID := s.mtlsID
 	if mtlsID == "" {
-		if id := r.matchSet(targetHost(s.typ, block)); id != "" {
+		if id := r.matchSet(targetHost(s.typ, block), s.authID); id != "" {
 			mtlsID = id
 		}
 	}
@@ -664,7 +662,7 @@ func (r *scenarioRun) prepare(typ string, block map[string]any) (execFn, error) 
 		if err := fromMap(block, &s); err != nil {
 			return nil, fmt.Errorf("grpc: %w", err)
 		}
-		dir := r.e.Store.AssetDir(r.app.ID, "protos")
+		dir := r.e.Store.ProtosDir(r.app.ID)
 		return func(ctx context.Context, c *auth.Credentials) (*model.Response, error) {
 			return executor.GRPC(ctx, &s, c, dir)
 		}, nil
