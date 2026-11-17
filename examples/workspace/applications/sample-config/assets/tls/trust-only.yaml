@@ -1,7 +1,5 @@
 # Trusts the private CA but presents no client certificate. Negative tests
-# use it to prove the service refuses callers without one.
+# pick it to prove the service refuses callers without one.
 id: trust-only
 name: Trust the CA, no client certificate
-type: none
-tls:
-  ca: demo-ca.crt
+ca: demo-ca.crt

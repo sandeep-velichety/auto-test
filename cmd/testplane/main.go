@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -293,6 +294,41 @@ func validate(args []string) int {
 				}
 			}
 		}
+		// Certificate sets, checked for every environment of the application.
+		sets, err := st.ListCertSets(a.ID)
+		if err != nil {
+			die(err)
+		}
+		knownSets := map[string]bool{model.AuthNone: true}
+		envs := []string{""}
+		for e := range a.Environments {
+			envs = append(envs, e)
+		}
+		sort.Strings(envs)
+		for _, c := range sets {
+			knownSets[c.ID] = true
+			where := "tls/" + c.ID
+			if strings.HasPrefix(c.Description, "INVALID: ") {
+				report(where, strings.TrimPrefix(c.Description, "INVALID: "))
+				continue
+			}
+			for _, e := range c.Validate() {
+				report(where, e)
+			}
+			seen := map[string]bool{}
+			for _, env := range envs {
+				for _, ch := range auth.TLSChecks(c.For(env), false, st.AssetDir(a.ID, "certs")) {
+					msg := fmt.Sprintf("%s (%s): %s %s", ch.Label, ch.File, ch.Status, ch.Detail)
+					if ch.Status != "ok" && (ch.Required || ch.Status != "not_set") && !seen[msg] {
+						seen[msg] = true
+						if env != "" {
+							msg = "environment " + env + ": " + msg
+						}
+						report(where, msg)
+					}
+				}
+			}
+		}
 		if a.DefaultAuth != "" && !known[a.DefaultAuth] {
 			report("application", "defaultAuth "+a.DefaultAuth+" is not a known auth profile")
 		}
@@ -316,11 +352,25 @@ func validate(args []string) int {
 				report(where, e)
 			}
 			refs := []string{sc.Auth}
+			setRefs := []string{sc.MTLS}
 			for _, t := range sc.Tests {
 				tests += 1 + len(t.Variants)
 				refs = append(refs, t.Auth)
+				setRefs = append(setRefs, t.MTLS)
 				for _, v := range t.Variants {
 					refs = append(refs, v.Auth)
+					setRefs = append(setRefs, v.MTLS)
+				}
+			}
+			for _, r := range setRefs {
+				if owner, id, ok := strings.Cut(r, "/"); ok {
+					if _, err := st.GetCertSet(owner, id); err == nil {
+						continue
+					}
+				}
+				if r != "" && !knownSets[r] {
+					report(where, "certificate set "+r+" does not exist")
+					knownSets[r] = true
 				}
 			}
 			for _, r := range refs {
@@ -335,7 +385,7 @@ func validate(args []string) int {
 				}
 			}
 		}
-		fmt.Printf("  %d scenario(s), %d test(s), %d auth profile(s)\n", len(scs), tests, len(profiles))
+		fmt.Printf("  %d scenario(s), %d test(s), %d auth profile(s), %d certificate set(s)\n", len(scs), tests, len(profiles), len(sets))
 	}
 	if checked == 0 {
 		fmt.Fprintln(os.Stderr, "error: no application found in", *ws)

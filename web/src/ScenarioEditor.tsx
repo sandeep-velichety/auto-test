@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { api, slug, uniqueId } from './api'
-import type { Application, AuthProfile, RunResult, Scenario, Test, TestType } from './types'
+import type { Application, AuthProfile, CertSet, RunResult, Scenario, Test, TestType } from './types'
 import { Field, KV, Notice, Section, Text, useAction } from './widgets'
-import { AuthSelect, blankStep, KindBadge, TestEditor, TYPE_LABEL, TypeBadge } from './TestEditor'
+import { AuthSelect, blankStep, KindBadge, MtlsSelect, TestEditor, TYPE_LABEL, TypeBadge } from './TestEditor'
 import { RunView } from './RunView'
 import { History } from './History'
 
@@ -25,8 +25,8 @@ function withIds(sc: Scenario): Scenario {
   return { ...sc, tests }
 }
 
-export function ScenarioEditor({ app, scenarioId, profiles, protos, env, onSaved, onDeleted }: {
-  app: Application; scenarioId: string; profiles: AuthProfile[]; protos: string[]; env: string
+export function ScenarioEditor({ app, scenarioId, profiles, sets, protos, env, onSaved, onDeleted }: {
+  app: Application; scenarioId: string; profiles: AuthProfile[]; sets: CertSet[]; protos: string[]; env: string
   onSaved: (s: Scenario) => void; onDeleted: () => void
 }) {
   const [sc, setSc] = useState<Scenario | null>(null)
@@ -137,6 +137,7 @@ export function ScenarioEditor({ app, scenarioId, profiles, protos, env, onSaved
               <Field label="Scenario name" wide><Text value={sc.name} onChange={name => change({ name })} /></Field>
               <Field label="Tags" hint="Comma separated. Runs can be filtered by tag."><Text value={(sc.tags || []).join(', ')} onChange={v => change({ tags: v.split(',').map(t => t.trim()).filter(Boolean) })} placeholder="smoke, orders" /></Field>
               <Field group label="Default auth for every step"><AuthSelect value={sc.auth} onChange={auth => change({ auth })} profiles={profiles} inherited={app.defaultAuth || 'none'} /></Field>
+              <Field label="Default mutual TLS for every step"><MtlsSelect value={sc.mtls} onChange={mtls => change({ mtls })} sets={sets} inherited="" /></Field>
             </div>
             <Field label="Description" wide><Text value={sc.description} onChange={description => change({ description: description || undefined })} /></Field>
             <Section title="Variables" count={Object.keys(sc.variables || {}).length}>
@@ -167,7 +168,7 @@ export function ScenarioEditor({ app, scenarioId, profiles, protos, env, onSaved
                   <button type="button" className="icon" title="Delete step" onClick={() => { if (confirm(`Delete step “${t.name || t.id}”?`)) change({ tests: sc.tests.filter((_, j) => j !== i) }) }}>×</button>
                 </div>
               </div>
-              {open === t.id && <TestEditor test={t} onChange={nt => setTest(i, nt)} profiles={profiles} inheritedAuth={inherited} protos={protos} />}
+              {open === t.id && <TestEditor test={t} onChange={nt => setTest(i, nt)} profiles={profiles} inheritedAuth={inherited} protos={protos} sets={sets} inheritedMtls={sc.mtls || ''} />}
             </div>
           ))}
           <div className="add-row">

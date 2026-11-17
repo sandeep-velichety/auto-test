@@ -1,4 +1,4 @@
-import type { AuthProfile, Assertion, Expect, Test, TestType, Variant } from './types'
+import type { AuthProfile, Assertion, CertSet, Expect, Test, TestType, Variant } from './types'
 import { uniqueId } from './api'
 import { Badge, Check, Field, JsonField, KV, Num, Section, Select, Text } from './widgets'
 
@@ -87,7 +87,7 @@ export function ExpectEditor({ type, kind, value, onChange }: { type: TestType; 
           </Field>
         )}
         <Field label="Max duration (ms)"><Num value={x.maxDurationMs} onChange={maxDurationMs => set({ maxDurationMs })} /></Field>
-        <Field label="Call fails with error containing" hint="For calls that never get a response, such as a refused TLS handshake."><Text value={x.error} onChange={error => set({ error })} /></Field>
+        <Field label="Call fails with error containing" hint="For calls that never get a response, such as a refused TLS handshake. * accepts any failure."><Text value={x.error} onChange={error => set({ error })} /></Field>
       </div>
       <Field group label="Checks on the result" wide hint={type === 'logs' ? 'Result is {count, logs:[{timestamp, status, service, host, message, attributes}]}: use logs.0.message' : type === 'postgres' ? 'Result is {count, rows:[…]}: use rows.0.column' : type === 'mongo' ? 'Result is {count, documents:[…]}: use documents.0.field' : type === 'kafka' ? 'Result is {key, value, headers, partition, offset}: use value.field' : 'Paths into the JSON response, e.g. data.items.0.id'}>
         <Assertions value={x.body} onChange={body => set({ body })} addLabel="Add check" />
@@ -231,8 +231,36 @@ export function AuthSelect({ value, onChange, profiles, inherited }: { value: st
   )
 }
 
-function VariantEditor({ type, v, onChange, onRemove, profiles, inherited }: {
-  type: TestType; v: Variant; onChange: (v: Variant) => void; onRemove: () => void; profiles: AuthProfile[]; inherited: string
+/** "Is mutual TLS needed, and with which certificates?" */
+export function MtlsSelect({ value, onChange, sets, inherited }: { value: string | undefined; onChange: (v: string | undefined) => void; sets: CertSet[]; inherited: string }) {
+  const effective = value || inherited
+  const set = sets.find(c => c.id === effective)
+  const unknown = !!effective && effective !== 'none' && !set
+  const auto = sets.some(c => c.hosts?.length)
+  const label = (id: string) => (id && id !== 'none' ? sets.find(c => c.id === id)?.name || id : id === 'none' ? 'not needed' : auto ? 'automatic by host' : 'not needed')
+  return (
+    <div>
+      <Select value={value || ''} onChange={v => onChange(v || undefined)}
+        options={[['', inherited ? `inherit (${label(inherited)})` : auto ? 'automatic: the set registered for the host, if any' : 'not needed'], ['none', 'never: present no certificate'], ...sets.map(c => [c.id, `${c.name || c.id}`] as [string, string])]} />
+      {unknown && <span className="hint error">Certificate set “{effective}” does not exist. Create it under Auth &amp; assets.</span>}
+      {sets.length === 0 && !effective && <span className="hint">No certificate sets yet. Add one under Auth &amp; assets to use mutual TLS.</span>}
+      {set?.checks && (
+        <ul className="certlist">
+          {set.checks.filter(c => c.required || c.status !== 'not_set').map(c => (
+            <li key={c.field} className={c.status === 'ok' ? 'ok' : 'bad'}>
+              <strong>{c.label}</strong>{' '}
+              {c.status === 'ok' ? <>ready: <code>{c.file}</code></> : c.status === 'not_set' ? 'not chosen yet' : <>{c.status.replace('_', ' ')}{c.file ? <>: <code>{c.file}</code></> : null}</>}
+              {c.status !== 'ok' && <span className="hint">{c.help} Fix it under Auth &amp; assets.</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function VariantEditor({ type, v, onChange, onRemove, profiles, inherited, sets, inheritedMtls }: {
+  type: TestType; v: Variant; onChange: (v: Variant) => void; onRemove: () => void; profiles: AuthProfile[]; inherited: string; sets: CertSet[]; inheritedMtls: string
 }) {
   const set = (patch: Partial<Variant>) => onChange({ ...v, ...patch })
   const kind = v.kind || 'negative'
@@ -242,6 +270,7 @@ function VariantEditor({ type, v, onChange, onRemove, profiles, inherited }: {
         <Field label="Case name" wide><Text value={v.name} onChange={name => set({ name })} placeholder="Rejected when quantity is zero" /></Field>
         <Field label="Kind"><Select value={kind} onChange={k => set({ kind: k === 'negative' ? undefined : k })} options={['negative', 'positive']} /></Field>
         <Field group label="Auth for this case"><AuthSelect value={v.auth} onChange={auth => set({ auth })} profiles={profiles} inherited={inherited} /></Field>
+        <Field label="Mutual TLS for this case"><MtlsSelect value={v.mtls} onChange={mtls => set({ mtls })} sets={sets} inherited={inheritedMtls} /></Field>
       </div>
       <Field label={`What changes compared with the parent (${type} fields, JSON)`} wide hint='Only the differences. Example: {"body": {"quantity": 0}} or {"headers": {"X-Tenant": ""}}. null removes a field.'>
         <JsonField rows={3} value={(v as any)[type]} onChange={o => set({ [type]: o && typeof o === 'object' ? o : undefined } as any)} placeholder="{}" />
@@ -255,8 +284,8 @@ function VariantEditor({ type, v, onChange, onRemove, profiles, inherited }: {
   )
 }
 
-export function TestEditor({ test, onChange, profiles, inheritedAuth, protos }: {
-  test: Test; onChange: (t: Test) => void; profiles: AuthProfile[]; inheritedAuth: string; protos: string[]
+export function TestEditor({ test, onChange, profiles, inheritedAuth, protos, sets, inheritedMtls }: {
+  test: Test; onChange: (t: Test) => void; profiles: AuthProfile[]; inheritedAuth: string; protos: string[]; sets: CertSet[]; inheritedMtls: string
 }) {
   const set = (patch: Partial<Test>) => onChange({ ...test, ...patch })
   const kind = test.kind || 'positive'
@@ -280,6 +309,7 @@ export function TestEditor({ test, onChange, profiles, inheritedAuth, protos }: 
         </Field>
         <Field label="Kind" hint="Negative tests expect the call to be rejected."><Select value={kind} onChange={k => set({ kind: k === 'positive' ? undefined : k })} options={['positive', 'negative']} /></Field>
         <Field group label="Auth"><AuthSelect value={test.auth} onChange={auth => set({ auth })} profiles={profiles} inherited={inheritedAuth} /></Field>
+        <Field label="Mutual TLS" hint="Whether this call presents a client certificate, and which one."><MtlsSelect value={test.mtls} onChange={mtls => set({ mtls })} sets={sets} inherited={inheritedMtls} /></Field>
       </div>
 
       <Section title={TYPE_LABEL[test.type]} open>
@@ -298,7 +328,7 @@ export function TestEditor({ test, onChange, profiles, inheritedAuth, protos }: 
       <Section title="Paired cases (same call, something changed)" open={variants.length > 0} count={variants.length}>
         <p className="hint">Each case re-runs this test with a few fields overridden, right after it. This is the quick way to add negative tests: write only what differs and what should happen.</p>
         {variants.map((v, i) => (
-          <VariantEditor key={v.id} type={test.type} v={v} profiles={profiles} inherited={test.auth || inheritedAuth}
+          <VariantEditor key={v.id} type={test.type} v={v} profiles={profiles} inherited={test.auth || inheritedAuth} sets={sets} inheritedMtls={test.mtls || inheritedMtls}
             onChange={nv => set({ variants: variants.map((o, j) => (j === i ? nv : o)) })}
             onRemove={() => { const n = variants.filter((_, j) => j !== i); set({ variants: n.length ? n : undefined }) }} />
         ))}

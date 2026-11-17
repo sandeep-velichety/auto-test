@@ -56,32 +56,46 @@ func NewResolver(certsDir string) *Resolver {
 	return &Resolver{CertsDir: certsDir, cache: map[string]*Credentials{}}
 }
 
-// Resolve returns credentials for an already-templated profile.
+// Resolve returns credentials for an already-templated profile, with
+// certificate files taken from the resolver's own directory.
 func (r *Resolver) Resolve(ctx context.Context, p *model.AuthProfile) (*Credentials, error) {
-	if p == nil || p.Type == model.AuthNone || p.Type == "" {
+	if p == nil {
+		return None(), nil
+	}
+	return r.ResolveIn(ctx, p, r.CertsDir, p.ID)
+}
+
+// ResolveIn is Resolve with an explicit certificate directory and cache
+// key, so one resolver can serve several applications and the same profile
+// combined with different certificate sets.
+func (r *Resolver) ResolveIn(ctx context.Context, p *model.AuthProfile, certsDir, key string) (*Credentials, error) {
+	if p == nil || ((p.Type == model.AuthNone || p.Type == "") && p.TLS == nil && len(p.Headers) == 0) {
 		return None(), nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if c, ok := r.cache[p.ID]; ok {
+	if c, ok := r.cache[key]; ok {
 		return c, nil
 	}
-	c, err := r.resolve(ctx, p)
+	c, err := r.resolve(ctx, p, certsDir)
 	if err != nil {
 		return nil, fmt.Errorf("auth profile %q: %w", p.ID, err)
 	}
-	r.cache[p.ID] = c
+	r.cache[key] = c
 	return c, nil
 }
 
-func (r *Resolver) resolve(ctx context.Context, p *model.AuthProfile) (*Credentials, error) {
+func (r *Resolver) resolve(ctx context.Context, p *model.AuthProfile, certsDir string) (*Credentials, error) {
+	if p.Type == "" {
+		p.Type = model.AuthNone
+	}
 	if errs := p.Validate(); len(errs) > 0 {
 		return nil, fmt.Errorf("%s", strings.Join(errs, "; "))
 	}
 	c := None()
 	c.ProfileID = p.ID
 	if p.TLS != nil {
-		if err := r.loadTLS(c, p.TLS); err != nil {
+		if err := loadTLS(c, p.TLS, certsDir); err != nil {
 			return nil, err
 		}
 	}
@@ -107,8 +121,111 @@ func (r *Resolver) resolve(ctx context.Context, p *model.AuthProfile) (*Credenti
 			name = "Authorization"
 		}
 		c.Headers[name] = joinPrefix(p.OAuth2.Prefix, tok)
+	case model.AuthHTTPCall:
+		tok, err := callForToken(ctx, p.HTTPCall, c.TLS)
+		if err != nil {
+			return nil, err
+		}
+		name := p.HTTPCall.HeaderName
+		if name == "" {
+			name = "Authorization"
+		}
+		c.Headers[name] = joinPrefix(p.HTTPCall.Prefix, tok)
+	}
+	// Fixed headers go last so they can add to, or replace, what the type set.
+	for k, v := range p.Headers {
+		if v != "" {
+			c.Headers[k] = v
+		}
 	}
 	return c, nil
+}
+
+// callForToken runs the custom token request of an http_call profile.
+func callForToken(ctx context.Context, h *model.HTTPCallAuth, tlsCfg *tls.Config) (string, error) {
+	u, err := url.Parse(h.URL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("auth call: invalid url %q", h.URL)
+	}
+	q := u.Query()
+	for k, v := range h.Query {
+		q.Set(k, v)
+	}
+	u.RawQuery = q.Encode()
+	var body io.Reader
+	contentType := ""
+	switch {
+	case len(h.Form) > 0:
+		f := url.Values{}
+		for k, v := range h.Form {
+			f.Set(k, v)
+		}
+		body, contentType = strings.NewReader(f.Encode()), "application/x-www-form-urlencoded"
+	case h.Body != nil:
+		if str, ok := h.Body.(string); ok {
+			body = strings.NewReader(str)
+			if json.Valid([]byte(str)) {
+				contentType = "application/json"
+			}
+		} else {
+			b, err := json.Marshal(h.Body)
+			if err != nil {
+				return "", fmt.Errorf("auth call body: %w", err)
+			}
+			body, contentType = strings.NewReader(string(b)), "application/json"
+		}
+	}
+	method := strings.ToUpper(h.Method)
+	if method == "" {
+		method = http.MethodPost
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
+	if err != nil {
+		return "", fmt.Errorf("auth call: %w", err)
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	req.Header.Set("Accept", "application/json")
+	for k, v := range h.Headers {
+		if v != "" {
+			req.Header.Set(k, v)
+		}
+	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	if tlsCfg != nil {
+		tr.TLSClientConfig = tlsCfg
+	}
+	defer tr.CloseIdleConnections()
+	resp, err := (&http.Client{Transport: tr}).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("auth call to %s: %w", h.URL, err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", fmt.Errorf("auth call to %s answered %d: %s", h.URL, resp.StatusCode, truncate(string(raw), 300))
+	}
+	path := h.TokenPath
+	if path == "" {
+		path = "access_token"
+	}
+	if strings.HasPrefix(path, "$header.") {
+		if v := resp.Header.Get(strings.TrimPrefix(path, "$header.")); v != "" {
+			return v, nil
+		}
+		return "", fmt.Errorf("auth call to %s: response has no %s header", h.URL, strings.TrimPrefix(path, "$header."))
+	}
+	if !json.Valid(raw) {
+		return "", fmt.Errorf("auth call to %s did not return JSON", h.URL)
+	}
+	tok := gjson.GetBytes(raw, path).String()
+	if tok == "" {
+		return "", fmt.Errorf("auth call to %s: response has no %q value", h.URL, path)
+	}
+	return tok, nil
 }
 
 func joinPrefix(prefix, token string) string {
@@ -121,12 +238,12 @@ func joinPrefix(prefix, token string) string {
 	return prefix + " " + token
 }
 
-func (r *Resolver) loadTLS(c *Credentials, t *model.TLSSettings) error {
+func loadTLS(c *Credentials, t *model.TLSSettings, certsDir string) error {
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: t.ServerName, InsecureSkipVerify: t.InsecureSkipVerify}
 	c.ServerName, c.InsecureSkipVerify = t.ServerName, t.InsecureSkipVerify
 	if t.Cert != "" {
-		c.CertFile = filepath.Join(r.CertsDir, t.Cert)
-		c.KeyFile = filepath.Join(r.CertsDir, t.Key)
+		c.CertFile = filepath.Join(certsDir, t.Cert)
+		c.KeyFile = filepath.Join(certsDir, t.Key)
 		pair, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
 		if err != nil {
 			return fmt.Errorf("client certificate %s / key %s: %w", t.Cert, t.Key, err)
@@ -134,7 +251,7 @@ func (r *Resolver) loadTLS(c *Credentials, t *model.TLSSettings) error {
 		cfg.Certificates = []tls.Certificate{pair}
 	}
 	if t.CA != "" {
-		c.CAFile = filepath.Join(r.CertsDir, t.CA)
+		c.CAFile = filepath.Join(certsDir, t.CA)
 		pemBytes, err := os.ReadFile(c.CAFile)
 		if err != nil {
 			return fmt.Errorf("CA bundle %s: %w", t.CA, err)
@@ -241,7 +358,12 @@ func CertChecks(p *model.AuthProfile, certsDir string) []Check {
 	if t == nil {
 		t = &model.TLSSettings{}
 	}
-	mtls := p.Type == model.AuthMTLS || t.Cert != "" || t.Key != ""
+	return TLSChecks(t, p.Type == model.AuthMTLS, certsDir)
+}
+
+// TLSChecks is CertChecks for bare TLS settings (a certificate set).
+func TLSChecks(t *model.TLSSettings, clientRequired bool, certsDir string) []Check {
+	mtls := clientRequired || t.Cert != "" || t.Key != ""
 	checks := []Check{
 		fileCheck(certsDir, "tls.cert", "Client certificate", "PEM certificate (plus any intermediates) issued to this test client by a CA the service trusts.", mtls, t.Cert, "CERTIFICATE"),
 		fileCheck(certsDir, "tls.key", "Client private key", "Unencrypted PEM private key that matches the client certificate.", mtls, t.Key, "PRIVATE KEY"),

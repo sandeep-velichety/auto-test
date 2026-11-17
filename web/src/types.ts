@@ -26,8 +26,21 @@ export interface AuthProfile {
     scopes?: string[]; audience?: string; clientAuth?: string; extraParams?: Dict
     tokenField?: string; headerName?: string; prefix?: string
   }
+  headers?: Dict
+  httpCall?: { method?: string; url: string; headers?: Dict; query?: Dict; body?: any; form?: Dict; tokenPath?: string; headerName?: string; prefix?: string }
   tls?: TLSSettings
+  /** Per-environment differences, merged over the fields above. */
+  environments?: Record<string, Record<string, any>>
   certChecks?: CertCheck[]
+}
+
+/** Named certificate files for mutual TLS; tests pick one. */
+export interface CertSet extends TLSSettings {
+  id: string; name: string; description?: string
+  /** Hosts this set applies to automatically (host, host:port, *.domain). */
+  hosts?: string[]
+  environments?: Record<string, TLSSettings>
+  checks?: CertCheck[]
 }
 
 export interface Assertion { path: string; op?: string; value?: any }
@@ -38,7 +51,7 @@ export interface Expect {
 }
 
 export interface Variant {
-  id: string; name: string; kind?: string; auth?: string; properties?: Dict; skip?: boolean
+  id: string; name: string; kind?: string; auth?: string; mtls?: string; properties?: Dict; skip?: boolean
   http?: any; grpc?: any; kafka?: any; mongo?: any; postgres?: any; logs?: any
   expect?: Expect
 }
@@ -46,7 +59,7 @@ export interface Variant {
 export type TestType = 'http' | 'grpc' | 'kafka' | 'mongo' | 'postgres' | 'logs'
 
 export interface Test {
-  id: string; name: string; description?: string; type: TestType; kind?: string; auth?: string
+  id: string; name: string; description?: string; type: TestType; kind?: string; auth?: string; mtls?: string
   properties?: Dict; skip?: boolean; continueOnFail?: boolean
   retry?: { attempts: number; delayMs?: number }
   http?: any; grpc?: any; kafka?: any; mongo?: any; postgres?: any; logs?: any
@@ -55,7 +68,7 @@ export interface Test {
 
 export interface Scenario {
   id: string; name: string; description?: string; tags?: string[]; properties?: Dict
-  auth?: string; variables?: Dict; tests: Test[]
+  auth?: string; mtls?: string; variables?: Dict; tests: Test[]
 }
 
 export interface Asset {
@@ -66,7 +79,7 @@ export interface Asset {
 export interface AssertionResult { check: string; passed: boolean; expected?: string; actual?: string }
 
 export interface TestResult {
-  id: string; name: string; variantOf?: string; type: string; kind: string; auth?: string
+  id: string; name: string; variantOf?: string; type: string; kind: string; auth?: string; mtls?: string
   properties?: Dict; status: string; attempts?: number; durationMs: number
   request?: any
   response?: { status: number; statusText?: string; headers?: Record<string, string[]>; body?: string; durationMs: number }

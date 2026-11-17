@@ -1,0 +1,12 @@
+# Template: token from ForgeRock Access Management (client credentials),
+# used as a bearer token. Add forgerockHost and forgerockRealm to each
+# environment and set FORGEROCK_CLIENT_SECRET for the backend. Some
+# installations serve AM under /openam instead of /am.
+id: forgerock-client
+name: ForgeRock (template)
+type: oauth2_client_credentials
+oauth2:
+  tokenUrl: "https://{{forgerockHost}}/am/oauth2/realms/root/realms/{{forgerockRealm}}/access_token"
+  clientId: "{{forgerockClientId}}"
+  clientSecret: "{{$env.FORGEROCK_CLIENT_SECRET}}"
+  # scopes: [orders.read]

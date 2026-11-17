@@ -395,7 +395,7 @@ The application must exist on that backend. The tests still run on the build age
 
 - **Secrets:** write `{{$env.NAME}}` in an auth profile instead of the value, and provide `NAME` to the process (systemd `EnvironmentFile`, container env, Kubernetes Secret, CI secret). The value is resolved at run time and is not written back to disk. A missing variable fails the test with "undefined variable".
 - **Secrets typed straight into a profile** are stored as plain text in `assets/auth/<id>.yaml` (file mode `0600`). Fine for throwaway test credentials; avoid it for anything that matters.
-- **Certificates:** PEM files in `applications/<id>/assets/certs`. Private keys must be unencrypted PEM. The API lists what a file is (certificate, key, subject, expiry) and never returns its contents. Uploaded files are written with mode `0600`.
+- **Certificates:** PEM files in `applications/<id>/assets/certs`, named by certificate sets in `assets/tls` (which can point at different files per environment). Private keys must be unencrypted PEM. The API lists what a file is (certificate, key, subject, expiry) and never returns its contents. Uploaded files are written with mode `0600`.
 - **Keys in pipelines:** keep the key out of Git and write it into `assets/certs/` from a CI secret before the run, as in the GitHub Actions example.
 - **Expiry:** `testplane validate` fails when a referenced certificate is missing, expired, of the wrong kind or does not match its key. Running it on a schedule gives early warning.
 - **Run history** (`.runs/`) stores requests and responses of each test, truncated at 64 KB per body. Tokens added by auth profiles are not recorded and Datadog keys are masked; anything else you put in a step's own headers or body is stored.

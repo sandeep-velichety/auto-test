@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -112,7 +113,7 @@ func (e *Engine) Run(ctx context.Context, o Options) (*model.RunResult, error) {
 		Application: app.ID, Environment: envName, StartedAt: start.UTC(), TriggeredBy: o.By, Source: o.Source,
 		Status: model.StatusPassed, Scenarios: []model.ScenarioResult{},
 	}
-	shared := &runShared{store: e.Store, appEnv: appEnv, resolvers: map[string]*auth.Resolver{}}
+	shared := &runShared{store: e.Store, appEnv: appEnv, env: envName, resolver: auth.NewResolver("")}
 	for i := range selected {
 		sr := e.runScenario(ctx, app, &selected[i], base, shared, o)
 		run.Scenarios = append(run.Scenarios, sr)
@@ -143,22 +144,14 @@ func copyVars(m map[string]string) map[string]string {
 	return out
 }
 
-// runShared is state kept for a whole run: one credential resolver per
-// application (so tokens are fetched once) and every application's
-// environment values.
+// runShared is state kept for a whole run: the credential resolver (so
+// tokens are fetched once), the environment being run and every
+// application's environment values.
 type runShared struct {
-	store     *store.Store
-	appEnv    map[string]map[string]string
-	resolvers map[string]*auth.Resolver
-}
-
-func (s *runShared) resolver(app string) *auth.Resolver {
-	r, ok := s.resolvers[app]
-	if !ok {
-		r = auth.NewResolver(s.store.AssetDir(app, "certs"))
-		s.resolvers[app] = r
-	}
-	return r
+	store    *store.Store
+	appEnv   map[string]map[string]string
+	env      string
+	resolver *auth.Resolver
 }
 
 func anyTag(have, want []string) bool {
@@ -176,6 +169,7 @@ func anyTag(have, want []string) bool {
 type spec struct {
 	id, name, variantOf string
 	typ, kind, authID   string
+	mtlsID              string
 	props               map[string]string
 	block               map[string]any
 	expect              *model.Expect
@@ -191,6 +185,50 @@ type scenarioRun struct {
 	shared  *runShared
 	kafka   *executor.KafkaSession
 	started time.Time
+	sets    []model.CertSet // this application's certificate sets, loaded once
+	setsOK  bool
+}
+
+// matchSet finds a certificate set of this application whose host patterns
+// cover the host a step is about to call.
+func (r *scenarioRun) matchSet(host string) string {
+	if host == "" {
+		return ""
+	}
+	if !r.setsOK {
+		r.sets, _ = r.e.Store.ListCertSets(r.app.ID)
+		r.setsOK = true
+	}
+	for _, c := range r.sets {
+		if len(c.Hosts) == 0 {
+			continue
+		}
+		rd := newRenderer(r.vars)
+		patterns := make([]string, len(c.Hosts))
+		for i, h := range c.Hosts {
+			patterns[i] = rd.str(h)
+		}
+		if model.MatchesHost(patterns, host) {
+			return c.ID
+		}
+	}
+	return ""
+}
+
+// targetHost returns the host:port a rendered step will call, for the step
+// types where a certificate can be matched by host.
+func targetHost(typ string, block map[string]any) string {
+	switch typ {
+	case model.TypeHTTP, model.TypeLogs:
+		raw, _ := block["url"].(string)
+		if u, err := url.Parse(raw); err == nil {
+			return u.Host
+		}
+	case model.TypeGRPC:
+		t, _ := block["target"].(string)
+		return t
+	}
+	return ""
 }
 
 func (e *Engine) runScenario(ctx context.Context, app *model.Application, sc *model.Scenario, base map[string]string, shared *runShared, o Options) model.ScenarioResult {
@@ -240,7 +278,7 @@ func (e *Engine) runScenario(ctx context.Context, app *model.Application, sc *mo
 		if kind == "" {
 			kind = model.KindPositive
 		}
-		baseSpec := spec{id: t.ID, name: t.Name, typ: t.Type, kind: kind, authID: run.authFor(t.Auth), props: t.Properties,
+		baseSpec := spec{id: t.ID, name: t.Name, typ: t.Type, kind: kind, authID: run.authFor(t.Auth), mtlsID: firstSet(t.MTLS, sc.MTLS), props: t.Properties,
 			expect: t.Expect, retry: t.Retry, capture: t.Capture}
 		blk, err := toMap(stepBlock(t))
 		if err != nil {
@@ -288,7 +326,7 @@ func (e *Engine) runScenario(ctx context.Context, app *model.Application, sc *mo
 			for k, val := range v.Properties {
 				props[k] = val
 			}
-			vs := spec{id: t.ID + "." + v.ID, name: v.Name, variantOf: t.ID, typ: t.Type, kind: vk, authID: authID, props: props,
+			vs := spec{id: t.ID + "." + v.ID, name: v.Name, variantOf: t.ID, typ: t.Type, kind: vk, authID: authID, mtlsID: firstSet(v.MTLS, baseSpec.mtlsID), props: props,
 				block: merge(blk, variantOverride(t.Type, v)), expect: v.Expect, retry: t.Retry}
 			if vs.name == "" {
 				vs.name = v.ID
@@ -359,16 +397,21 @@ func (r *scenarioRun) authFor(id string) string {
 	return id
 }
 
-// credentials resolves a profile id. "other-app/profile" borrows a profile
-// (and its certificates) from another application; its placeholders are
-// filled from that application's environment first.
-func (r *scenarioRun) credentials(ctx context.Context, id string) (*auth.Credentials, error) {
-	if id == model.AuthNone {
-		return auth.None(), nil
+func firstSet(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
 	}
-	appID, profileID, vars := r.app.ID, id, r.vars
-	if owner, rest, ok := strings.Cut(id, "/"); ok {
-		appID, profileID = owner, rest
+	return ""
+}
+
+// owner splits "other-app/id" and returns the variables to render that
+// application's assets with: its own environment values take precedence.
+func (r *scenarioRun) owner(id string) (appID, localID string, vars map[string]string) {
+	appID, localID, vars = r.app.ID, id, r.vars
+	if o, rest, ok := strings.Cut(id, "/"); ok {
+		appID, localID = o, rest
 		if appID != r.app.ID {
 			vars = copyVars(r.vars)
 			for k, v := range r.shared.appEnv[appID] {
@@ -376,25 +419,72 @@ func (r *scenarioRun) credentials(ctx context.Context, id string) (*auth.Credent
 			}
 		}
 	}
-	p, err := r.e.Store.GetAuth(appID, profileID)
-	if err != nil {
-		return nil, fmt.Errorf("auth profile %q: %w", id, err)
+	return
+}
+
+// credentials combines an auth profile with a certificate set.
+//
+// authID is a profile id, "other-app/profile" or "none". mtlsID is a
+// certificate set id, "other-app/set", "none" (present no certificate even
+// if the profile has one) or "" (use whatever the profile carries). Both
+// are read as they apply in the environment being run.
+func (r *scenarioRun) credentials(ctx context.Context, authID, mtlsID string) (*auth.Credentials, error) {
+	profile := &model.AuthProfile{ID: model.AuthNone, Type: model.AuthNone}
+	certsDir := r.e.Store.AssetDir(r.app.ID, "certs")
+	if authID != model.AuthNone && authID != "" {
+		appID, id, vars := r.owner(authID)
+		stored, err := r.e.Store.GetAuth(appID, id)
+		if err != nil {
+			return nil, fmt.Errorf("auth profile %q: %w", authID, err)
+		}
+		eff, err := stored.ForEnv(r.shared.env)
+		if err != nil {
+			return nil, fmt.Errorf("auth profile %q: %w", authID, err)
+		}
+		m, err := toMap(eff)
+		if err != nil {
+			return nil, err
+		}
+		rd := newRenderer(vars)
+		rendered := rd.value(m)
+		if err := rd.err(); err != nil {
+			return nil, fmt.Errorf("auth profile %q: %w", authID, err)
+		}
+		profile = &model.AuthProfile{}
+		if err := fromMap(rendered, profile); err != nil {
+			return nil, err
+		}
+		profile.ID = id
+		certsDir = r.e.Store.AssetDir(appID, "certs")
 	}
-	m, err := toMap(p)
-	if err != nil {
-		return nil, err
+	switch mtlsID {
+	case "":
+	case model.AuthNone:
+		profile.TLS = nil
+		if profile.Type == model.AuthMTLS {
+			profile.Type = model.AuthNone
+		}
+	default:
+		appID, id, vars := r.owner(mtlsID)
+		set, err := r.e.Store.GetCertSet(appID, id)
+		if err != nil {
+			return nil, fmt.Errorf("certificate set %q: %w", mtlsID, err)
+		}
+		t := set.For(r.shared.env)
+		rd := newRenderer(vars)
+		t.ServerName = rd.str(t.ServerName)
+		if err := rd.err(); err != nil {
+			return nil, fmt.Errorf("certificate set %q: %w", mtlsID, err)
+		}
+		if owner := r.e.Store.AssetDir(appID, "certs"); owner != certsDir && profile.TLS != nil {
+			// Files of the profile and of the set live in different folders;
+			// the set wins, so the profile's own files are not needed.
+			profile.TLS = nil
+		}
+		profile.TLS = t
+		certsDir = r.e.Store.AssetDir(appID, "certs")
 	}
-	rd := newRenderer(vars)
-	rendered := rd.value(m)
-	if err := rd.err(); err != nil {
-		return nil, fmt.Errorf("auth profile %q: %w", id, err)
-	}
-	var out model.AuthProfile
-	if err := fromMap(rendered, &out); err != nil {
-		return nil, err
-	}
-	out.ID = profileID
-	return r.shared.resolver(appID).Resolve(ctx, &out)
+	return r.shared.resolver.ResolveIn(ctx, profile, certsDir, authID+"|"+mtlsID)
 }
 
 // markKafka notes the end of every topic a consume step will read, before
@@ -421,7 +511,7 @@ func (r *scenarioRun) markKafka(ctx context.Context) {
 		if fromMap(rendered, &step) != nil {
 			continue
 		}
-		creds, err := r.credentials(ctx, r.authFor(t.Auth))
+		creds, err := r.credentials(ctx, r.authFor(t.Auth), firstSet(t.MTLS, r.sc.MTLS))
 		if err != nil {
 			continue
 		}
@@ -435,6 +525,7 @@ func (r *scenarioRun) runOne(ctx context.Context, s spec) model.TestResult {
 	if s.authID != model.AuthNone {
 		tr.Auth = s.authID
 	}
+	tr.MTLS = s.mtlsID
 	fail := func(err error) model.TestResult {
 		tr.Status, tr.Error = model.StatusError, err.Error()
 		tr.DurationMs = time.Since(start).Milliseconds()
@@ -457,6 +548,15 @@ func (r *scenarioRun) runOne(ctx context.Context, s spec) model.TestResult {
 	}
 	tr.Request = redact(block)
 
+	// No explicit choice: use the certificate set registered for this host.
+	mtlsID := s.mtlsID
+	if mtlsID == "" {
+		if id := r.matchSet(targetHost(s.typ, block)); id != "" {
+			mtlsID = id
+		}
+	}
+	tr.MTLS = mtlsID
+
 	exec, err := r.prepare(s.typ, block)
 	if err != nil {
 		return fail(err)
@@ -471,7 +571,7 @@ func (r *scenarioRun) runOne(ctx context.Context, s spec) model.TestResult {
 	for n := 1; n <= attempts; n++ {
 		tr.Attempts = n
 		tr.Error, tr.Assertions, tr.Response = "", nil, nil
-		creds, err := r.credentials(ctx, s.authID)
+		creds, err := r.credentials(ctx, s.authID, mtlsID)
 		var resp *model.Response
 		if err == nil {
 			resp, err = exec(ctx, creds)
@@ -605,6 +705,10 @@ func evaluate(s spec, x *model.Expect, resp *model.Response, err error) ([]model
 	if x.Error != "" {
 		if err == nil {
 			add("call fails with error", false, x.Error, "call succeeded: "+resp.StatusText)
+		} else if x.Error == "*" {
+			// Any failure will do: useful where the exact message depends on
+			// timing, such as a server dropping a connection without a certificate.
+			add("call fails", true, "any error", err.Error())
 		} else {
 			add("call fails with error", strings.Contains(strings.ToLower(err.Error()), strings.ToLower(x.Error)), x.Error, err.Error())
 		}

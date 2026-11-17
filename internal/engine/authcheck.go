@@ -19,9 +19,10 @@ type AuthCheck struct {
 	CertChecks []auth.Check `json:"certChecks,omitempty"`
 }
 
-// CheckAuth loads a profile's certificates and, for OAuth2 profiles,
-// fetches a token from the real token endpoint.
-func (e *Engine) CheckAuth(ctx context.Context, appID, profileID, envName string) (*AuthCheck, error) {
+// CheckAuth resolves a profile as a run in that environment would: it loads
+// certificates and fetches tokens from the real endpoints. mtlsID optionally
+// names the certificate set to combine it with.
+func (e *Engine) CheckAuth(ctx context.Context, appID, profileID, envName, mtlsID string) (*AuthCheck, error) {
 	app, err := e.Store.GetApp(appID)
 	if err != nil {
 		return nil, err
@@ -44,9 +45,13 @@ func (e *Engine) CheckAuth(ctx context.Context, appID, profileID, envName string
 		}
 	}
 	certsDir := e.Store.AssetDir(appID, "certs")
-	out := &AuthCheck{CertChecks: auth.CertChecks(p, certsDir)}
-	run := &scenarioRun{e: e, app: app, sc: &model.Scenario{}, vars: vars, shared: &runShared{store: e.Store, appEnv: map[string]map[string]string{}, resolvers: map[string]*auth.Resolver{}}}
-	creds, err := run.credentials(ctx, profileID)
+	eff, err := p.ForEnv(envName)
+	if err != nil {
+		return nil, err
+	}
+	out := &AuthCheck{CertChecks: auth.CertChecks(eff, certsDir)}
+	run := &scenarioRun{e: e, app: app, sc: &model.Scenario{}, vars: vars, shared: &runShared{store: e.Store, appEnv: map[string]map[string]string{}, env: envName, resolver: auth.NewResolver("")}}
+	creds, err := run.credentials(ctx, profileID, mtlsID)
 	if err != nil {
 		out.Error = err.Error()
 		return out, nil

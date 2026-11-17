@@ -74,6 +74,17 @@ func Handler() http.Handler {
 		}
 		send(w, 200, map[string]any{"access_token": token, "token_type": "Bearer", "expires_in": 3600})
 	})
+	// A non-standard login, for auth profiles that fetch a token with a
+	// custom call: JSON in, token nested in the JSON out.
+	mux.HandleFunc("POST /auth/login", func(w http.ResponseWriter, r *http.Request) {
+		var in struct{ Username, Password string }
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		if r.Header.Get("X-Client-Id") != ClientID || in.Username != "qa-user" || in.Password != "qa-password" {
+			send(w, 401, map[string]string{"error": "bad credentials"})
+			return
+		}
+		send(w, 200, map[string]any{"data": map[string]any{"session": map[string]string{"token": token}}})
+	})
 	authed := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("Authorization") != "Bearer "+token {

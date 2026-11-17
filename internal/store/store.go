@@ -2,6 +2,7 @@
 //
 //	<workspace>/applications/<app>/application.yaml
 //	<workspace>/applications/<app>/assets/auth/<profile>.yaml
+//	<workspace>/applications/<app>/assets/tls/<certificate set>.yaml
 //	<workspace>/applications/<app>/assets/certs/<file>
 //	<workspace>/applications/<app>/assets/protos/<file>
 //	<workspace>/applications/<app>/scenarios/<scenario>.yaml
@@ -145,7 +146,7 @@ func (s *Store) SaveApp(a *model.Application) error {
 	if a.Name == "" {
 		a.Name = a.ID
 	}
-	for _, d := range []string{"scenarios", "assets/auth", "assets/certs", "assets/protos"} {
+	for _, d := range []string{"scenarios", "assets/auth", "assets/tls", "assets/certs", "assets/protos"} {
 		if err := os.MkdirAll(filepath.Join(s.AppDir(a.ID), d), 0o755); err != nil {
 			return err
 		}
@@ -333,6 +334,77 @@ func (s *Store) SaveAuth(app string, a *model.AuthProfile) error {
 
 func (s *Store) DeleteAuth(app, id string) error {
 	p, err := s.authPath(app, id)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(p); errors.Is(err, fs.ErrNotExist) {
+		return ErrNotFound
+	} else {
+		return err
+	}
+}
+
+// ---- certificate sets ----
+
+func (s *Store) tlsPath(app, id string) (string, error) {
+	if !model.ValidID(app) || !model.ValidID(id) {
+		return "", invalid("id %q/%q", app, id)
+	}
+	return filepath.Join(s.AssetDir(app, "tls"), id+".yaml"), nil
+}
+
+func (s *Store) ListCertSets(app string) ([]model.CertSet, error) {
+	if _, err := s.GetApp(app); err != nil {
+		return nil, err
+	}
+	ids, err := listIDs(s.AssetDir(app, "tls"), ".yaml")
+	if err != nil {
+		return nil, err
+	}
+	out := []model.CertSet{}
+	for _, id := range ids {
+		c, err := s.GetCertSet(app, id)
+		if err != nil {
+			out = append(out, model.CertSet{ID: id, Name: id, Description: "INVALID: " + err.Error()})
+			continue
+		}
+		out = append(out, *c)
+	}
+	return out, nil
+}
+
+func (s *Store) GetCertSet(app, id string) (*model.CertSet, error) {
+	p, err := s.tlsPath(app, id)
+	if err != nil {
+		return nil, err
+	}
+	var c model.CertSet
+	if err := readYAML(p, &c); err != nil {
+		return nil, err
+	}
+	c.ID = id
+	return &c, nil
+}
+
+func (s *Store) SaveCertSet(app string, c *model.CertSet) error {
+	if _, err := s.GetApp(app); err != nil {
+		return err
+	}
+	if errs := c.Validate(); len(errs) > 0 {
+		return invalid("%s", strings.Join(errs, "; "))
+	}
+	if c.Name == "" {
+		c.Name = c.ID
+	}
+	p, err := s.tlsPath(app, c.ID)
+	if err != nil {
+		return err
+	}
+	return writeYAML(p, c)
+}
+
+func (s *Store) DeleteCertSet(app, id string) error {
+	p, err := s.tlsPath(app, id)
 	if err != nil {
 		return err
 	}
@@ -705,7 +777,7 @@ func (s *Store) ImportApp(data []byte) (string, error) {
 			ok = true
 		case len(rel) == 2 && rel[0] == "scenarios" && strings.HasSuffix(rel[1], ".yaml") && model.ValidID(strings.TrimSuffix(rel[1], ".yaml")):
 			ok = true
-		case len(rel) == 3 && rel[0] == "assets" && rel[1] == "auth" && strings.HasSuffix(rel[2], ".yaml") && model.ValidID(strings.TrimSuffix(rel[2], ".yaml")):
+		case len(rel) == 3 && rel[0] == "assets" && (rel[1] == "auth" || rel[1] == "tls") && strings.HasSuffix(rel[2], ".yaml") && model.ValidID(strings.TrimSuffix(rel[2], ".yaml")):
 			ok = true
 		case len(rel) == 3 && rel[0] == "assets" && validCategory(rel[1]) && model.ValidFileName(rel[2]):
 			ok = true

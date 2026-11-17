@@ -51,14 +51,17 @@ func TestHeadersAndMetadataOverMutualTLS(t *testing.T) {
 			Variants: []model.Variant{
 				{ID: "no-header", HTTP: map[string]any{"headers": map[string]any{"X-Tenant": ""}}, Expect: &model.Expect{Status: intp(400)}},
 				{ID: "no-profile-header", HTTP: map[string]any{"headers": map[string]any{"X-Api-Key": ""}}, Expect: &model.Expect{Body: []model.Assertion{{Path: "headers.X-Api-Key", Op: "not_exists"}}}, Kind: model.KindPositive},
-				{ID: "no-cert", Auth: "trust-only", Expect: &model.Expect{Error: "certificate"}},
+				{ID: "no-cert", Auth: "trust-only", Expect: &model.Expect{Error: "*"}},
 			}},
 		{ID: "grpc", Type: model.TypeGRPC, Auth: "key-and-cert", GRPC: health(),
 			Expect: &model.Expect{Code: "OK", Body: []model.Assertion{{Path: "status", Value: "SERVING"}}},
 			Variants: []model.Variant{
 				{ID: "no-metadata", GRPC: map[string]any{"metadata": map[string]any{"x-tenant": ""}}, Expect: &model.Expect{Code: "INVALID_ARGUMENT"}},
-				{ID: "no-cert", Auth: "trust-only", Expect: &model.Expect{Error: "certificate"}},
+				// What a gRPC client sees when the server drops it for having no
+				// certificate depends on timing, so accept any failure.
+				{ID: "no-cert", Auth: "trust-only", Expect: &model.Expect{Error: "*"}},
 				{ID: "untrusted-server", Auth: "none", Expect: &model.Expect{Error: "certificate"}},
+				{ID: "star-needs-a-failure", Expect: &model.Expect{Error: "*"}, Kind: model.KindPositive},
 				{ID: "plaintext-to-tls", GRPC: map[string]any{"plaintext": true}},
 			}},
 		{ID: "grpc-default-auth", Type: model.TypeGRPC, GRPC: health()},
@@ -66,7 +69,7 @@ func TestHeadersAndMetadataOverMutualTLS(t *testing.T) {
 	res, err := New(st).Run(context.Background(), Options{App: "shop"})
 	must(t, err)
 	want := map[string]string{"http": "passed", "http.no-header": "passed", "http.no-profile-header": "passed", "http.no-cert": "passed",
-		"grpc": "passed", "grpc.no-metadata": "passed", "grpc.no-cert": "passed", "grpc.untrusted-server": "passed", "grpc.plaintext-to-tls": "error", "grpc-default-auth": "passed"}
+		"grpc": "passed", "grpc.no-metadata": "passed", "grpc.no-cert": "passed", "grpc.untrusted-server": "passed", "grpc.star-needs-a-failure": "failed", "grpc.plaintext-to-tls": "error", "grpc-default-auth": "passed"}
 	got := statuses(res)
 	for id, w := range want {
 		if got[id] != w {

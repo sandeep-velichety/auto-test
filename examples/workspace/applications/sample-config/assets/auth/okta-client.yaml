@@ -1,0 +1,13 @@
+# Template: token from Okta (client credentials), used as a bearer token.
+# Add oktaDomain to each environment, e.g. dev-123456.okta.com, and set
+# OKTA_CLIENT_SECRET for the backend. "default" is Okta's built-in
+# authorization server; use your own server's id if you have one.
+id: okta-client
+name: Okta (template)
+type: oauth2_client_credentials
+oauth2:
+  tokenUrl: "https://{{oktaDomain}}/oauth2/default/v1/token"
+  clientId: "{{oktaClientId}}"
+  clientSecret: "{{$env.OKTA_CLIENT_SECRET}}"
+  scopes: [api.read]          # Okta requires at least one scope
+  clientAuth: basic

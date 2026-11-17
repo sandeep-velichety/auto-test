@@ -1,14 +1,21 @@
-# Sample configuration: certificates, auth profiles, an HTTP test with
-# headers and a gRPC test with metadata over mutual TLS.
-# Walkthrough: docs/sample-config.md
+# Sample configuration: everything here belongs to this one application,
+# and can differ per environment. Walkthrough: docs/sample-config.md
 id: sample-config
 name: Sample configuration
-description: Reference setup for certificates, auth profiles, HTTP headers and gRPC metadata over mutual TLS. Runs against "testplane demo".
+description: Reference setup for certificate sets, auth profiles, HTTP headers and gRPC metadata over mutual TLS. Runs against "testplane demo".
 defaultEnvironment: local
-defaultAuth: client-cert            # used by every test that does not choose its own
 environments:
   local:
-    baseUrl: http://127.0.0.1:8089          # plain HTTP API with an OAuth2 token endpoint
+    baseUrl: http://127.0.0.1:8089          # plain HTTP API, token endpoint and custom login
     secureUrl: https://localhost:8091       # HTTPS API that demands a client certificate
+    secureHost: localhost:8091              # used by the certificate set to match this host
     grpcSecureTarget: localhost:8092        # gRPC service that demands a client certificate
     tenant: acme
+  # A second environment. In real life these are other addresses; here they
+  # point at the same demo so both environments can be run.
+  staging:
+    baseUrl: http://127.0.0.1:8089
+    secureUrl: https://localhost:8091
+    secureHost: localhost:8091
+    grpcSecureTarget: localhost:8092
+    tenant: acme-staging

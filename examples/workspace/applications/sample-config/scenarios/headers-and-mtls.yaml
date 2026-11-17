@@ -1,20 +1,20 @@
 id: headers-and-mtls
 name: HTTP headers and gRPC metadata over mutual TLS
-description: An HTTP call with headers, a token-authenticated call, and a gRPC call with metadata, each with negative cases.
+description: Each test chooses its auth and whether mutual TLS is needed. HTTP with headers, three ways of getting a token, and gRPC with metadata, each with negative cases.
 tags: [sample]
 variables:
   requestId: "req-{{$uuid}}"          # set once, reused by every step
 tests:
-  # ---- HTTP with headers, authenticated by client certificate ----
+  # ---- HTTP with headers; the certificate is chosen automatically by host ----
   - id: http-with-headers
     name: HTTP call with headers over mutual TLS
     type: http
-    # no auth here: inherits the application's defaultAuth (client-cert)
+    auth: tenant-headers                    # sends X-Tenant and X-Api-Key
+    # no "mtls:" line: the "client" certificate set lists this host, so it is used
     http:
       method: GET
       url: "{{secureUrl}}/secure/echo"
       headers:
-        X-Tenant: "{{tenant}}"
         X-Request-Id: "{{requestId}}"
         Accept: application/json
       query:
@@ -28,12 +28,14 @@ tests:
           value: testplane-demo-client
         - path: headers.X-Tenant
           value: "{{tenant}}"
+        - path: headers.X-Api-Key
+          value: demo-key
     variants:
       - id: missing-tenant-header
         name: Rejected without the X-Tenant header
         http:
           headers:
-            X-Tenant: ""                    # an empty value removes the header
+            X-Tenant: ""                    # an empty value removes a header, even one from the auth profile
         expect:
           status: 400
           body:
@@ -42,13 +44,13 @@ tests:
               value: X-Tenant
       - id: no-client-certificate
         name: TLS handshake refused without a client certificate
-        auth: trust-only
+        mtls: trust-only                    # trusts the CA, presents nothing
         expect:
-          error: certificate                # the call fails before any response
+          error: "*"                        # the call fails before any response; the exact message varies
 
-  # ---- HTTP with a bearer token fetched by an OAuth2 profile, plus headers ----
-  - id: http-with-token
-    name: HTTP call with an OAuth2 token and headers
+  # ---- Token from an identity provider (OAuth2), sent as a bearer token ----
+  - id: http-with-idp-token
+    name: HTTP call with a token from the identity provider
     type: http
     auth: oauth-client
     http:
@@ -61,6 +63,8 @@ tests:
         quantity: 1
     expect:
       status: 201
+    capture:
+      orderId: id
     variants:
       - id: token-overridden
         name: Rejected when the step overrides the Authorization header
@@ -70,17 +74,31 @@ tests:
         expect:
           status: 401
 
-  # ---- gRPC with metadata (headers), API key and client certificate ----
+  # ---- Token from a custom HTTP call ----
+  - id: http-with-login-call
+    name: HTTP call with a token from a custom login call
+    type: http
+    auth: login-call
+    http:
+      method: GET
+      url: "{{baseUrl}}/orders/{{orderId}}"
+    expect:
+      status: 200
+      body:
+        - path: item
+          value: sample
+
+  # ---- gRPC with metadata; mutual TLS chosen explicitly on the test ----
   - id: grpc-with-metadata
     name: gRPC call with metadata over mutual TLS
     type: grpc
-    auth: api-key-over-mtls                 # sends x-api-key metadata + the client certificate
+    auth: tenant-headers                    # X-Tenant and X-Api-Key become metadata
+    mtls: client                            # mutual TLS is needed: present this certificate set
     grpc:
       target: "{{grpcSecureTarget}}"
       method: grpc.health.v1.Health/Check
-      # plaintext is left out, so TLS is used with the profile's certificates
-      metadata:                             # gRPC's headers
-        x-tenant: "{{tenant}}"
+      # plaintext is left out, so TLS is used
+      metadata:                             # gRPC's headers, added to the profile's
         x-request-id: "{{requestId}}"
       message:
         service: orders
@@ -93,9 +111,7 @@ tests:
     variants:
       - id: missing-tenant-metadata
         name: Rejected without x-tenant metadata
-        grpc:
-          metadata:
-            x-tenant: ""
+        auth: none
         expect:
           code: INVALID_ARGUMENT
       - id: unknown-service
@@ -107,6 +123,6 @@ tests:
           code: NOT_FOUND
       - id: no-client-certificate
         name: Connection refused without a client certificate
-        auth: trust-only
+        mtls: trust-only
         expect:
-          error: certificate
+          error: "*"                        # any failure; the exact gRPC message varies

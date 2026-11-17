@@ -42,7 +42,7 @@ function TestRow({ t }: { t: TestResult }) {
             <p className="muted">Properties: {Object.entries(t.properties).map(([k, v]) => <code key={k}>{k}: {v} </code>)}</p>
           )}
           {t.request !== undefined && (
-            <details><summary>Request{t.auth ? ` (auth: ${t.auth})` : ''}</summary><pre>{JSON.stringify(t.request, null, 2)}</pre></details>
+            <details><summary>Request{t.auth ? ` (auth: ${t.auth})` : ''}{t.mtls && t.mtls !== 'none' ? ` (mutual TLS: ${t.mtls})` : ''}</summary><pre>{JSON.stringify(t.request, null, 2)}</pre></details>
           )}
           {t.response && (
             <details open={failed}>

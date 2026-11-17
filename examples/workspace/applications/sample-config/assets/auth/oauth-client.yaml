@@ -1,7 +1,7 @@
-# OAuth2 client credentials: a token is fetched from tokenUrl once per run
-# and sent as "Authorization: Bearer <token>".
+# Ask an identity provider for a token (OAuth2 client credentials) and send
+# it as "Authorization: Bearer <token>". Fetched once per run.
 id: oauth-client
-name: OAuth2 client credentials
+name: Token from the identity provider
 type: oauth2_client_credentials
 oauth2:
   tokenUrl: "{{baseUrl}}/oauth/token"
@@ -10,3 +10,9 @@ oauth2:
   # scopes: [orders.read, orders.write]
   # audience: orders-api
   # clientAuth: basic         # send id/secret as HTTP Basic instead of in the form body
+# Per-environment differences are merged over the values above.
+environments:
+  staging:
+    oauth2:
+      clientId: demo-client   # staging's own client id and secret go here
+      clientSecret: demo-secret

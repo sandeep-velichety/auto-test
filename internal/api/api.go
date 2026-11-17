@@ -48,6 +48,12 @@ type authView struct {
 	CertChecks []auth.Check `json:"certChecks,omitempty"`
 }
 
+type certSetView struct {
+	model.CertSet
+	// Checks describe the files used in the environment asked for.
+	Checks []auth.Check `json:"checks"`
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -262,10 +268,65 @@ func (s *Server) Handler() http.Handler {
 	})
 
 	// auth profiles
-	view := func(app string, p model.AuthProfile) authView {
-		// Stored secrets are write-only: they go out masked.
-		return authView{AuthProfile: p.Masked(), CertChecks: auth.CertChecks(&p, st.AssetDir(app, "certs"))}
+	// envOf returns the environment a request is about (?env=, else the
+	// application's default).
+	envOf := func(r *http.Request) string {
+		if e := r.URL.Query().Get("env"); e != "" {
+			return e
+		}
+		if a, err := st.GetApp(r.PathValue("app")); err == nil {
+			return a.DefaultEnvironment
+		}
+		return ""
 	}
+	view := func(app, env string, p model.AuthProfile) authView {
+		eff, err := p.ForEnv(env)
+		if err != nil {
+			eff = &p
+		}
+		// Stored secrets are write-only: they go out masked.
+		return authView{AuthProfile: p.Masked(), CertChecks: auth.CertChecks(eff, st.AssetDir(app, "certs"))}
+	}
+	setView := func(app, env string, c model.CertSet) certSetView {
+		return certSetView{CertSet: c, Checks: auth.TLSChecks(c.For(env), false, st.AssetDir(app, "certs"))}
+	}
+
+	// certificate sets
+	mux.HandleFunc("GET /api/apps/{app}/tls", func(w http.ResponseWriter, r *http.Request) {
+		app := r.PathValue("app")
+		list, err := st.ListCertSets(app)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		env := envOf(r)
+		out := make([]certSetView, 0, len(list))
+		for _, c := range list {
+			out = append(out, setView(app, env, c))
+		}
+		writeJSON(w, 200, out)
+	})
+	mux.HandleFunc("PUT /api/apps/{app}/tls/{id}", func(w http.ResponseWriter, r *http.Request) {
+		var c model.CertSet
+		if err := decode(r, &c); err != nil {
+			fail(w, err)
+			return
+		}
+		c.ID = r.PathValue("id")
+		if err := st.SaveCertSet(r.PathValue("app"), &c); err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, setView(r.PathValue("app"), envOf(r), c))
+	})
+	mux.HandleFunc("DELETE /api/apps/{app}/tls/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if err := st.DeleteCertSet(r.PathValue("app"), r.PathValue("id")); err != nil {
+			fail(w, err)
+			return
+		}
+		w.WriteHeader(204)
+	})
+
 	mux.HandleFunc("GET /api/apps/{app}/auth", func(w http.ResponseWriter, r *http.Request) {
 		app := r.PathValue("app")
 		list, err := st.ListAuth(app)
@@ -273,9 +334,10 @@ func (s *Server) Handler() http.Handler {
 			fail(w, err)
 			return
 		}
+		env := envOf(r)
 		out := make([]authView, 0, len(list))
 		for _, p := range list {
-			out = append(out, view(app, p))
+			out = append(out, view(app, env, p))
 		}
 		writeJSON(w, 200, out)
 	})
@@ -293,7 +355,7 @@ func (s *Server) Handler() http.Handler {
 			fail(w, err)
 			return
 		}
-		writeJSON(w, 200, view(r.PathValue("app"), p))
+		writeJSON(w, 200, view(r.PathValue("app"), envOf(r), p))
 	})
 	mux.HandleFunc("DELETE /api/apps/{app}/auth/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if err := st.DeleteAuth(r.PathValue("app"), r.PathValue("id")); err != nil {
@@ -306,7 +368,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/apps/{app}/auth/{id}/check", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
 		defer cancel()
-		res, err := s.Engine.CheckAuth(ctx, r.PathValue("app"), r.PathValue("id"), r.URL.Query().Get("env"))
+		res, err := s.Engine.CheckAuth(ctx, r.PathValue("app"), r.PathValue("id"), r.URL.Query().Get("env"), r.URL.Query().Get("mtls"))
 		if err != nil {
 			fail(w, err)
 			return

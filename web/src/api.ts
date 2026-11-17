@@ -1,4 +1,4 @@
-import type { Application, Asset, AuthCheckResult, AuthProfile, Backend, RunQuery, RunResult, Scenario } from './types'
+import type { Application, Asset, AuthCheckResult, AuthProfile, Backend, CertSet, RunQuery, RunResult, Scenario } from './types'
 
 // ---- backend connections (kept in this browser only) ----
 
@@ -99,10 +99,13 @@ export const api = {
   scenarioYaml: (app: string, id: string) => call<string>('GET', `/apps/${e(app)}/scenarios/${e(id)}/yaml`, undefined, true),
   saveScenarioYaml: (app: string, id: string, yaml: string) => call<Scenario>('PUT', `/apps/${e(app)}/scenarios/${e(id)}/yaml`, yaml),
 
-  auth: (app: string) => call<AuthProfile[]>('GET', `/apps/${e(app)}/auth`),
+  auth: (app: string, env = '') => call<AuthProfile[]>('GET', `/apps/${e(app)}/auth?env=${e(env)}`),
+  certSets: (app: string, env = '') => call<CertSet[]>('GET', `/apps/${e(app)}/tls?env=${e(env)}`),
+  saveCertSet: (app: string, c: CertSet) => call<CertSet>('PUT', `/apps/${e(app)}/tls/${e(c.id)}`, c),
+  deleteCertSet: (app: string, id: string) => call<void>('DELETE', `/apps/${e(app)}/tls/${e(id)}`),
   saveAuth: (app: string, p: AuthProfile) => call<AuthProfile>('PUT', `/apps/${e(app)}/auth/${e(p.id)}`, p),
   deleteAuth: (app: string, id: string) => call<void>('DELETE', `/apps/${e(app)}/auth/${e(id)}`),
-  checkAuth: (app: string, id: string, env: string) => call<AuthCheckResult>('POST', `/apps/${e(app)}/auth/${e(id)}/check?env=${e(env)}`),
+  checkAuth: (app: string, id: string, env: string, mtls = '') => call<AuthCheckResult>('POST', `/apps/${e(app)}/auth/${e(id)}/check?env=${e(env)}&mtls=${e(mtls)}`),
 
   assets: (app: string) => call<Asset[]>('GET', `/apps/${e(app)}/assets`),
   uploadAsset: (app: string, category: string, name: string, data: ArrayBuffer) => call<void>('PUT', `/apps/${e(app)}/assets/${e(category)}/${e(name)}`, data),

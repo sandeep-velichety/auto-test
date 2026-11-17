@@ -1,0 +1,17 @@
+# A certificate set: the files this application presents for mutual TLS.
+# File names refer to ../certs.
+id: client
+name: Client certificate
+# Used automatically for calls to these hosts (like client certificates in
+# Postman). Tests can also pick the set by name, or turn it off.
+hosts:
+  - "{{secureHost}}"
+cert: demo-client.crt        # client certificate, PEM
+key: demo-client.key         # its private key, unencrypted PEM
+ca: demo-ca.crt              # CA that signed the SERVER's certificate (only for a private CA)
+# serverName: orders.internal   # when the certificate name differs from the host you call
+# Per-environment differences: only the fields that change.
+environments:
+  staging:
+    cert: demo-client.crt    # a real setup names staging's own files here
+    key: demo-client.key

@@ -24,7 +24,40 @@ Values of other applications are available as `{{app-id.name}}`, taken from that
 
 Built in: `{{$scenarioStart}}` (ISO time the scenario began), `{{$uuid}}`, `{{$timestamp}}`, `{{$timestampMs}}`, `{{$isoTimestamp}}`, `{{$randomInt}}`, `{{$env.NAME}}`. Built-ins produce a new value each time they appear; put one in a scenario variable to reuse the same value across steps.
 
+## Certificate sets (`assets/tls/<id>.yaml`)
+
+A certificate set names the files to present for mutual TLS. Files are PEM and live in `assets/certs`.
+
+```yaml
+id: client
+name: Orders client certificate
+hosts:                               # optional: present automatically on calls to these hosts
+  - "{{ordersHost}}"                 # host, host:port or *.example.com; variables allowed
+  - "*.internal.example.com:8443"
+cert: client.crt                     # client certificate
+key: client.key                      # private key, unencrypted
+ca: internal-ca.pem                  # only when the service's certificate comes from a private CA
+serverName: orders.internal          # optional: when the certificate name differs from the host
+insecureSkipVerify: false
+environments:                        # only the fields that differ
+  staging:
+    cert: client-staging.crt
+    key: client-staging.key
+```
+
+A set with only `ca` trusts that CA and presents no client certificate.
+
+Which set a call uses, first match wins:
+
+1. `mtls` on the case, then on the test, then on the scenario. `mtls: none` presents nothing.
+2. Otherwise the application's set whose `hosts` match the host being called (HTTP and logs: the URL's host; gRPC: the target).
+3. Otherwise the TLS settings of the auth profile, if it has any (older style, below).
+
+`mtls: other-app/client` borrows a set from another application.
+
 ## Auth profiles (`assets/auth/<id>.yaml`)
+
+Token from an identity provider (OAuth2). The token is fetched once per run:
 
 ```yaml
 id: orders-oauth
@@ -42,29 +75,59 @@ oauth2:
   prefix: Bearer                     # optional; "none" sends the bare token
   username: svc-user                 # oauth2_password only
   password: "{{$env.SVC_PASSWORD}}"  # oauth2_password only
-tls:                                 # optional on every type
-  cert: client.crt                   # file names in assets/certs
-  key: client.key
-  ca: internal-ca.pem
-  serverName: orders.internal        # optional
-  insecureSkipVerify: false
+headers:                             # optional on every type: extra headers sent with each request
+  X-Tenant: acme
+environments:                        # optional on every type: per-environment differences, deep-merged
+  staging:
+    oauth2:
+      clientId: qa-client-staging
+      clientSecret: "{{$env.ORDERS_STAGING_SECRET}}"
+```
+
+Token URL patterns for two common providers (replace the placeholders):
+
+| Provider | `tokenUrl` | Notes |
+| --- | --- | --- |
+| Okta | `https://<your-domain>/oauth2/<authorization-server-id>/v1/token` | `default` is the built-in authorization server; needs at least one scope; `clientAuth: basic` is the usual choice |
+| ForgeRock AM | `https://<host>/am/oauth2/realms/root/realms/<realm>/access_token` | some installations use `/openam` instead of `/am` |
+
+Token from a custom HTTP call, for logins that are not OAuth2:
+
+```yaml
+id: login-call
+name: Token from a custom login call
+type: http_call
+httpCall:
+  method: POST                       # default
+  url: "{{baseUrl}}/auth/login"
+  headers: {X-Client-Id: qa}
+  query: {realm: alpha}
+  body: {username: qa-user, password: "{{$env.QA_PASSWORD}}"}   # a map is sent as JSON
+  # form: {username: qa-user}        # alternative: urlencoded form
+  tokenPath: data.session.token      # where the token is; $header.Name reads a response header
+  headerName: Authorization          # header that carries the token on each test request
+  prefix: Bearer                     # "none" sends the bare token
 ```
 
 Other types:
 
 ```yaml
-type: basic
-basic: {username: qa, password: "{{$env.QA_PASSWORD}}"}
----
-type: bearer
-bearer: {token: "{{$env.API_TOKEN}}"}
+type: headers                        # fixed headers / keys
+headers: {X-Api-Key: "{{$env.API_KEY}}", X-Tenant: acme}
 ---
 type: api_key
 apiKey: {name: X-Api-Key, value: "{{$env.API_KEY}}", in: header}   # or query
 ---
-type: mtls
-tls: {cert: client.crt, key: client.key, ca: internal-ca.pem}
+type: bearer
+bearer: {token: "{{$env.API_TOKEN}}"}
+---
+type: basic
+basic: {username: qa, password: "{{$env.QA_PASSWORD}}"}
 ```
+
+Older style, still supported: a profile can carry its own `tls: {cert, key, ca}` block, and `type: mtls` is a profile that is nothing but that block. Prefer certificate sets; a set chosen on the test, or matched by host, takes the place of the profile's block.
+
+Through the API and UI, secret values (passwords, tokens, client secrets, API key values, every header and form value) are write-only: they come back as `********`. `{{$env.NAME}}` references are shown as written.
 
 How credentials reach each step type:
 
@@ -85,6 +148,7 @@ description: optional
 tags: [smoke]
 properties: {component: orders}
 auth: orders-oauth             # default for every step, optional
+mtls: client                   # default certificate set for every step, optional
 variables: {item: "widget-{{$randomInt}}"}
 tests: [...]
 ```
@@ -97,6 +161,7 @@ tests: [...]
 | `type` | `http`, `grpc`, `kafka`, `mongo`, `postgres`, `logs` |
 | `kind` | `positive` (default) or `negative` |
 | `auth` | profile id, `other-app/profile-id` to borrow another application's profile, or `none`; default inherits |
+| `mtls` | certificate set id, `other-app/set-id`, or `none`; default inherits, then matches by host |
 | `properties` | free-form labels |
 | `expect` | see below |
 | `capture` | `name: path`; also `$status` and `$header.Name` |
@@ -237,7 +302,7 @@ A borrowed profile's own placeholders are filled from its owner's environment: `
 | `body` | all | list of checks on the result document |
 | `bodyContains` | all | raw substrings |
 | `maxDurationMs` | all | latency budget |
-| `error` | all | the call must fail before any response (refused TLS handshake, connection refused, rejected token request) with a message containing this text |
+| `error` | all | the call must fail before any response (refused TLS handshake, connection refused, rejected token request) with a message containing this text; `"*"` accepts any such failure |
 
 When the main check (`status`, `code`, `count`, `found`) is left out, a default applies:
 
@@ -259,6 +324,7 @@ variants:
     name: Other tenant cannot read the order
     kind: negative          # default for a case
     auth: other-tenant      # optional
+    mtls: none              # optional
     properties: {priority: high}
     http:                   # deep-merged over the parent's http block
       headers: {X-Tenant: other}
@@ -278,8 +344,9 @@ All under `/api`; bodies are JSON unless noted. When the backend was started wit
 | `GET /apps`, `GET/PUT/DELETE /apps/{app}` | applications |
 | `GET /apps/{app}/scenarios`, `GET/PUT/DELETE /apps/{app}/scenarios/{id}` | scenarios |
 | `GET/PUT /apps/{app}/scenarios/{id}/yaml` | the stored file, as text |
-| `GET /apps/{app}/auth`, `PUT/DELETE /apps/{app}/auth/{id}` | auth profiles with certificate checks; secrets come back as `********`, and sending `********` keeps the stored value |
-| `POST /apps/{app}/auth/{id}/check?env=` | try a profile: load certificates, fetch the token |
+| `GET /apps/{app}/tls?env=`, `PUT/DELETE /apps/{app}/tls/{id}` | certificate sets, with file checks for that environment |
+| `GET /apps/{app}/auth?env=`, `PUT/DELETE /apps/{app}/auth/{id}` | auth profiles; secrets come back as `********`, and sending `********` keeps the stored value |
+| `POST /apps/{app}/auth/{id}/check?env=&mtls=` | try a profile as a run in that environment would, optionally with a certificate set |
 | `GET /apps/{app}/assets`, `PUT/DELETE /apps/{app}/assets/{certs\|protos}/{name}` | files (raw body on upload); contents are never returned |
 | `POST /apps/{app}/run` | `{environment, scenarios, tags, kind, vars}`; runs, stores and returns the result |
 | `GET /apps/{app}/runs?scenario=&status=&env=&from=&to=&limit=` | history, newest first, without test detail; dates are `YYYY-MM-DD` or RFC 3339; with `scenario`, status and totals describe that scenario |

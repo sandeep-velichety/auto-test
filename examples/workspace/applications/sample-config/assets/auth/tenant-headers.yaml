@@ -1,0 +1,7 @@
+# Fixed headers / keys sent with every request (gRPC: as metadata).
+id: tenant-headers
+name: Tenant and API key headers
+type: headers
+headers:
+  X-Tenant: "{{tenant}}"
+  X-Api-Key: demo-key              # real setups: "{{$env.ORDERS_API_KEY}}"

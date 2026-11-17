@@ -92,7 +92,8 @@ workspace/
       application.yaml          name, environments, default auth
       assets/
         auth/orders-oauth.yaml  one file per auth profile
-        certs/client.crt        certificates and keys used by profiles
+        tls/client.yaml         one file per certificate set (which files to present for mutual TLS)
+        certs/client.crt        the certificate and key files themselves
         protos/orders.proto     optional .proto files for gRPC
       scenarios/
         order-lifecycle.yaml    one file per scenario
@@ -104,17 +105,20 @@ Assets sit next to the application that uses them. To share an application, copy
 
 **Application.** One system under test. Its environments are sets of variables such as `baseUrl` or `postgresDsn`; tests refer to them as `{{baseUrl}}`, so the same scenarios run against any environment.
 
-**Auth profile.** How a test authenticates. Types: `basic`, `bearer`, `api_key`, `oauth2_client_credentials`, `oauth2_password`, `mtls`, `none`. OAuth2 profiles fetch a token from the token endpoint once per run. Any profile can carry TLS settings, so OAuth2 over mutual TLS is one profile. A test picks its profile; if it does not, it inherits from the scenario, then from the application.
+**Everything is per application and per environment.** Each application owns its certificate files, certificate sets, auth profiles and environments. Certificate sets and auth profiles can hold different values for each environment (staging's client id, production's certificate), so one scenario runs anywhere.
 
-**mTLS.** Choosing the `mtls` type lists what has to be provided and whether each file is in place:
+**Certificate set.** A named group of files for mutual TLS: client certificate, private key and, for a private CA, the CA bundle. You configure it once per application. A test then says whether mutual TLS is needed (`mtls: <set>`, or `mtls: none`). As in Postman, a set can also list hosts, and is then presented automatically on calls to those hosts. The editor shows which files are needed and whether each is uploaded, matching and unexpired; `testplane validate` reports the same for every environment.
 
-| File | Needed | What it is |
-| --- | --- | --- |
-| Client certificate | yes | PEM certificate issued to the test client by a CA the service trusts |
-| Client private key | yes | Unencrypted PEM key matching that certificate |
-| CA bundle | only for a private CA | PEM certificate(s) of the CA that signed the service's certificate |
+**Auth profile.** How a test gets its credentials, chosen per test or inherited from the scenario, then the application:
 
-The same list appears next to the auth selector while editing a test, and `testplane validate` reports missing, mismatched or expired files.
+| Kind | What it does |
+| --- | --- |
+| Token from an identity provider | OAuth2 client credentials or password grant against Okta, ForgeRock or any other provider; the token is fetched once per run and sent as a bearer token |
+| Token from a custom HTTP call | you describe the request (method, URL, headers, body) and where the token is in the response |
+| Fixed headers / keys | a set of headers sent with every request |
+| API key, bearer token, basic | the usual single-credential forms |
+
+Auth and mutual TLS are independent: any auth kind can be combined with any certificate set.
 
 **Scenario.** An ordered list of tests. They run top to bottom. A test can capture values from its result (`capture: {orderId: id}`) and later tests use them (`{{orderId}}`). When a test fails, the tests after it are skipped, because they usually depend on it; set `continueOnFail: true` to carry on.
 

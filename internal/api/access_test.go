@@ -240,3 +240,69 @@ func TestHistoryPublishAndRetention(t *testing.T) {
 		t.Error("old run file should be gone")
 	}
 }
+
+func TestCertificateSetsOverHTTP(t *testing.T) {
+	st := store.New(t.TempDir())
+	_ = st.SaveApp(&model.Application{ID: "shop", Name: "Shop", DefaultEnvironment: "dev", Environments: map[string]map[string]string{"dev": {}, "staging": {}}})
+	certs, _ := demo.NewCerts()
+	_ = certs.WriteClientFiles(st.AssetDir("shop", "certs"))
+	srv := httptest.NewServer(New(st, nil).Handler())
+	defer srv.Close()
+	c := client{t, srv.URL}
+
+	type view struct {
+		ID     string
+		Cert   string
+		Checks []struct{ Field, Status, File string }
+	}
+	set := model.CertSet{Name: "Client", Cert: "demo-client.crt", Key: "demo-client.key", CA: "demo-ca.crt",
+		Environments: map[string]model.TLSSettings{"staging": {Cert: "staging.crt", Key: "staging.key"}}}
+	var saved view
+	if code := c.do("PUT", "/api/apps/shop/tls/client", set, &saved); code != 200 || len(saved.Checks) != 3 || saved.Checks[0].Status != "ok" {
+		t.Fatalf("save: %d %+v", code, saved)
+	}
+	var list []view
+	if c.do("GET", "/api/apps/shop/tls", nil, &list); len(list) != 1 || list[0].Checks[0].Status != "ok" || list[0].Checks[0].File != "demo-client.crt" {
+		t.Fatalf("default environment: %+v", list)
+	}
+	if c.do("GET", "/api/apps/shop/tls?env=staging", nil, &list); list[0].Checks[0].Status != "missing" || list[0].Checks[0].File != "staging.crt" || list[0].Checks[2].Status != "ok" {
+		t.Fatalf("staging should report its own missing files and the shared CA: %+v", list)
+	}
+	for name, bad := range map[string]model.CertSet{
+		"empty":            {Name: "x"},
+		"cert without key": {Cert: "demo-client.crt"},
+		"path":             {Cert: "../x.crt", Key: "x.key"},
+	} {
+		if code := c.do("PUT", "/api/apps/shop/tls/bad", bad, nil); code != 400 {
+			t.Errorf("%s: %d, want 400", name, code)
+		}
+	}
+	if code := c.do("PUT", "/api/apps/shop/tls/Bad%20Id", set, nil); code != 400 {
+		t.Errorf("bad id: %d", code)
+	}
+
+	// A scenario can name the set; the zip carries it; delete removes it.
+	sc := model.Scenario{Name: "S", MTLS: "client", Tests: []model.Test{{ID: "t", Name: "T", Type: "http", MTLS: "none", HTTP: &model.HTTPStep{URL: "http://x"}}}}
+	if code := c.do("PUT", "/api/apps/shop/scenarios/s", sc, nil); code != 200 {
+		t.Fatalf("scenario with mtls: %d", code)
+	}
+	var raw []byte
+	c.do("GET", "/api/apps/shop/scenarios/s/yaml", nil, &raw)
+	if !strings.Contains(string(raw), "mtls: client") || !strings.Contains(string(raw), "mtls: none") {
+		t.Errorf("yaml: %s", raw)
+	}
+	c.do("GET", "/api/apps/shop/export", nil, &raw)
+	other := store.New(t.TempDir())
+	if _, err := other.ImportApp(raw); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := other.GetCertSet("shop", "client"); err != nil || got.Environments["staging"].Cert != "staging.crt" {
+		t.Errorf("certificate set after import: %+v %v", got, err)
+	}
+	if code := c.do("DELETE", "/api/apps/shop/tls/client", nil, nil); code != 204 {
+		t.Errorf("delete: %d", code)
+	}
+	if code := c.do("DELETE", "/api/apps/shop/tls/client", nil, nil); code != 404 {
+		t.Errorf("second delete: %d", code)
+	}
+}

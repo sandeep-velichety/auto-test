@@ -34,6 +34,7 @@ type TestResult struct {
 	Type       string            `json:"type"`
 	Kind       string            `json:"kind"`
 	Auth       string            `json:"auth,omitempty"`
+	MTLS       string            `json:"mtls,omitempty"`
 	Properties map[string]string `json:"properties,omitempty"`
 	Status     string            `json:"status"`
 	Attempts   int               `json:"attempts,omitempty"`

@@ -2,23 +2,29 @@
 
 A complete, runnable example lives in `examples/workspace/applications/sample-config`. This page walks through it file by file so you can copy the pattern for your own application.
 
+The model in one paragraph: every application configures its own certificates and auth, each of which can differ per environment. When you create a test you choose two things independently: **auth** (how it gets a token, key or headers) and **mutual TLS** (whether a client certificate is presented, and which one).
+
 ```
 applications/sample-config/
-  application.yaml                    environments and the default auth profile
+  application.yaml                    environments (local, staging) and their values
   assets/
     certs/                            certificate and key files (PEM)
       demo-client.crt                 client certificate
       demo-client.key                 client private key
       demo-ca.crt                     CA that signed the server's certificate
+    tls/                              certificate sets: which files to present for mutual TLS
+      client.yaml                     the client certificate, used automatically for one host
+      trust-only.yaml                 trusts the CA, presents nothing (for negative tests)
     auth/                             one file per auth profile
-      client-cert.yaml                mutual TLS
-      api-key-over-mtls.yaml          API key header + client certificate
-      oauth-client.yaml               OAuth2 client credentials
+      oauth-client.yaml               token from an identity provider (OAuth2), differs per environment
+      login-call.yaml                 token from a custom HTTP call
+      tenant-headers.yaml             fixed headers / keys
+      okta-client.yaml                Okta template
+      forgerock-client.yaml           ForgeRock template
       basic-user.yaml                 username and password (template)
       static-token.yaml               fixed bearer token (template)
-      trust-only.yaml                 trusts the CA, presents no certificate (for negative tests)
   scenarios/
-    headers-and-mtls.yaml             HTTP with headers, gRPC with metadata, negative cases
+    headers-and-mtls.yaml             HTTP with headers, three kinds of token, gRPC with metadata
 ```
 
 Run it:
@@ -27,9 +33,10 @@ Run it:
 ./bin/testplane demo --workspace examples/workspace &     # also writes the three demo-* certificate files
 ./bin/testplane validate --workspace examples/workspace --app sample-config
 ./bin/testplane run --workspace examples/workspace --app sample-config
+./bin/testplane run --workspace examples/workspace --app sample-config --env staging
 ```
 
-The demo system listens on `http://127.0.0.1:8089` (REST and token endpoint), `https://localhost:8091` (HTTPS that demands a client certificate) and `localhost:8092` (gRPC that demands a client certificate and `x-tenant` metadata).
+The demo system listens on `http://127.0.0.1:8089` (REST, an OAuth2 token endpoint and a custom login), `https://localhost:8091` (HTTPS that demands a client certificate) and `localhost:8092` (gRPC that demands a client certificate and `x-tenant` metadata).
 
 ## 1. Certificates
 
@@ -43,7 +50,7 @@ Certificates and keys are plain PEM files in the application's `assets/certs` fo
 
 Three ways to put them in place:
 
-- **UI:** Auth & assets, then "Upload certificate or key"; or use the Upload button next to each file in an mTLS profile.
+- **UI:** Auth & assets, then "Upload certificate or key"; or use the Upload button next to each file in a certificate set.
 - **Files:** copy them into `applications/<app>/assets/certs/` (mode `0600` for keys).
 - **Pipeline:** write the key from a CI secret before the run (see `docs/deployment.md`).
 
@@ -76,63 +83,110 @@ Check the result at any time:
 
 It reports a missing file, a certificate where a key should be, a key that does not match its certificate, and expired certificates.
 
-## 2. Auth profiles
+## 2. Certificate sets
 
-Each file in `assets/auth` is one way to authenticate. A test picks one with `auth: <id>`; otherwise it inherits from the scenario, then from the application's `defaultAuth`. `auth: none` sends nothing.
-
-**Mutual TLS** (`client-cert.yaml`):
+A certificate set tells the application which of those files to present. `assets/tls/client.yaml`:
 
 ```yaml
-id: client-cert
-name: Client certificate (mutual TLS)
-type: mtls
-tls:
-  cert: demo-client.crt     # file names in assets/certs
-  key: demo-client.key
-  ca: demo-ca.crt           # only for a private CA
+id: client
+name: Client certificate
+hosts:                       # present automatically on calls to these hosts
+  - "{{secureHost}}"         # a variable, so each environment can name its own host
+cert: demo-client.crt
+key: demo-client.key
+ca: demo-ca.crt
+environments:                # only what differs in an environment
+  staging:
+    cert: demo-client.crt    # a real setup names staging's own files here
+    key: demo-client.key
 ```
 
-**A header credential plus the certificate** (`api-key-over-mtls.yaml`). The `tls` block can be added to any type:
+`assets/tls/trust-only.yaml` has only `ca`: it trusts the server and presents nothing, which is what a negative test needs.
 
-```yaml
-id: api-key-over-mtls
-name: API key + client certificate
-type: api_key
-apiKey:
-  name: x-api-key
-  value: "{{$env.ORDERS_API_KEY}}"   # the sample uses a literal demo value
-  in: header                         # or: query
-tls:
-  cert: demo-client.crt
-  key: demo-client.key
-  ca: demo-ca.crt
-```
+In the UI: Auth & assets, "Certificate sets", + New. Pick the three files (or upload them there), optionally list hosts, and use the environment tabs for values that differ. Each file shows whether it is uploaded, of the right kind and unexpired.
 
-**OAuth2 client credentials** (`oauth-client.yaml`). The token is fetched once per run and sent as `Authorization: Bearer …`:
+How a test uses it:
+
+| On the test | Result |
+| --- | --- |
+| nothing | the set whose `hosts` match the call is presented; if none matches, no certificate |
+| `mtls: client` | that set is presented |
+| `mtls: none` | no certificate, even if a host matches |
+
+## 3. Auth profiles
+
+Each file in `assets/auth` is one way to get credentials. A test picks one with `auth: <id>`; otherwise it inherits from the scenario, then from the application's `defaultAuth`. `auth: none` sends nothing.
+
+**Token from an identity provider**, used as a bearer token (`oauth-client.yaml`). The backend asks the provider for a token before the first test that needs it:
 
 ```yaml
 id: oauth-client
-name: OAuth2 client credentials
+name: Token from the identity provider
 type: oauth2_client_credentials
 oauth2:
   tokenUrl: "{{baseUrl}}/oauth/token"
   clientId: demo-client
-  clientSecret: "{{$env.ORDERS_CLIENT_SECRET}}"
+  clientSecret: "{{$env.ORDERS_CLIENT_SECRET}}"   # the sample uses a literal demo value
+environments:
+  staging:
+    oauth2:
+      clientId: demo-client                        # staging's own client goes here
+      clientSecret: "{{$env.ORDERS_STAGING_SECRET}}"
 ```
 
-**Basic** and **bearer** (`basic-user.yaml`, `static-token.yaml`):
+**Okta** (`okta-client.yaml`) and **ForgeRock** (`forgerock-client.yaml`) are the same kind with those providers' token URLs:
 
 ```yaml
-type: basic
-basic: {username: qa-user, password: "{{$env.QA_PASSWORD}}"}
+type: oauth2_client_credentials
+oauth2:
+  tokenUrl: "https://{{oktaDomain}}/oauth2/default/v1/token"
+  clientId: "{{oktaClientId}}"
+  clientSecret: "{{$env.OKTA_CLIENT_SECRET}}"
+  scopes: [api.read]
+  clientAuth: basic
 ---
-type: bearer
-bearer: {token: "{{$env.API_TOKEN}}"}
+type: oauth2_client_credentials
+oauth2:
+  tokenUrl: "https://{{forgerockHost}}/am/oauth2/realms/root/realms/{{forgerockRealm}}/access_token"
+  clientId: "{{forgerockClientId}}"
+  clientSecret: "{{$env.FORGEROCK_CLIENT_SECRET}}"
 ```
 
-`{{$env.NAME}}` reads an environment variable of the backend (or of the pipeline job) so the secret is never in the file. In the UI the same profiles are created under Auth & assets; "Try it" loads the certificates and fetches a real token.
+Put `oktaDomain`, `oktaClientId` and so on in each environment of the application, so the same profile works everywhere. These two are templates: they were written from the providers' documented URL patterns and have not been run against a real tenant.
 
-## 3. HTTP test with headers
+**Token from a custom HTTP call** (`login-call.yaml`), for logins that are not OAuth2:
+
+```yaml
+id: login-call
+name: Token from a custom login call
+type: http_call
+httpCall:
+  method: POST
+  url: "{{baseUrl}}/auth/login"
+  headers:
+    X-Client-Id: demo-client
+  body:
+    username: qa-user
+    password: "{{$env.QA_PASSWORD}}"      # the sample uses a literal demo value
+  tokenPath: data.session.token           # where the token is in the JSON response
+  headerName: Authorization               # header that carries it on each test request
+  prefix: Bearer
+```
+
+**Fixed headers / keys** (`tenant-headers.yaml`):
+
+```yaml
+id: tenant-headers
+name: Tenant and API key headers
+type: headers
+headers:
+  X-Tenant: "{{tenant}}"
+  X-Api-Key: "{{$env.ORDERS_API_KEY}}"    # the sample uses a literal demo value
+```
+
+`{{$env.NAME}}` reads an environment variable of the backend (or of the pipeline job), so the secret is never in the file. In the UI the same profiles are created under Auth & assets; "Try it" resolves the profile for the chosen environment and fetches a real token.
+
+## 4. HTTP test with headers
 
 From `scenarios/headers-and-mtls.yaml`:
 
@@ -140,12 +194,12 @@ From `scenarios/headers-and-mtls.yaml`:
 - id: http-with-headers
   name: HTTP call with headers over mutual TLS
   type: http
-  # no auth line: inherits the application's defaultAuth (client-cert)
+  auth: tenant-headers                # sends X-Tenant and X-Api-Key
+  # no "mtls:" line: the "client" set lists this host, so it is presented
   http:
     method: GET
     url: "{{secureUrl}}/secure/echo"
     headers:
-      X-Tenant: "{{tenant}}"
       X-Request-Id: "{{requestId}}"
       Accept: application/json
     query:
@@ -167,19 +221,21 @@ From `scenarios/headers-and-mtls.yaml`:
         status: 400
     - id: no-client-certificate
       name: TLS handshake refused without a client certificate
-      auth: trust-only
+      mtls: trust-only
       expect:
-        error: certificate            # the call fails before any response
+        error: "*"                    # the call fails before any response
 ```
 
 How headers combine:
 
-- The auth profile adds its headers first (for example `Authorization` or `x-api-key`).
+- The auth profile adds its headers first (for example `Authorization`, `X-Tenant` or `X-Api-Key`).
 - Headers on the step are added on top and win when the names match.
 - A header set to `""` is removed, including one the profile would have sent.
 - A case (variant) only lists the headers that differ from its parent.
 
-## 4. gRPC test with metadata over mutual TLS
+`error: "*"` accepts any failure. Use it when a server drops a caller that has no certificate: what the client sees at that moment (a TLS alert, a reset connection, a broken pipe) depends on timing.
+
+## 5. gRPC test with metadata over mutual TLS
 
 gRPC's headers are called metadata:
 
@@ -187,12 +243,12 @@ gRPC's headers are called metadata:
 - id: grpc-with-metadata
   name: gRPC call with metadata over mutual TLS
   type: grpc
-  auth: api-key-over-mtls             # x-api-key metadata + the client certificate
+  auth: tenant-headers                # X-Tenant and X-Api-Key become metadata
+  mtls: client                        # mutual TLS is needed: present this certificate set
   grpc:
     target: "{{grpcSecureTarget}}"    # host:port; the host must match the server certificate
     method: grpc.health.v1.Health/Check
     metadata:
-      x-tenant: "{{tenant}}"
       x-request-id: "{{requestId}}"
     message:
       service: orders
@@ -203,26 +259,25 @@ gRPC's headers are called metadata:
   variants:
     - id: missing-tenant-metadata
       name: Rejected without x-tenant metadata
-      grpc:
-        metadata: {x-tenant: ""}
+      auth: none
       expect: {code: INVALID_ARGUMENT}
     - id: no-client-certificate
       name: Connection refused without a client certificate
-      auth: trust-only
-      expect: {error: certificate}
+      mtls: trust-only
+      expect: {error: "*"}
 ```
 
 Points that matter for gRPC over TLS:
 
-- Leave `plaintext` out (or `false`). TLS is then used, with the client certificate and CA from the auth profile. `plaintext: true` is only for servers without TLS.
-- The host in `target` must match a name in the server's certificate. Use the profile's `tls.serverName` when you connect by another name or by IP address.
-- Headers from the auth profile become metadata (lower-cased). `Authorization` from an OAuth2 or bearer profile works the same way.
+- Leave `plaintext` out (or `false`). TLS is then used, with the certificate set chosen on the test. `plaintext: true` is only for servers without TLS.
+- The host in `target` must match a name in the server's certificate. Use the set's `serverName` when you connect by another name or by IP address.
+- Headers from the auth profile become metadata (lower-cased). A bearer token from an identity provider works the same way.
 - The service description comes from server reflection. If the service has reflection turned off, upload its `.proto` files to `assets/protos` and list them under `protoFiles`.
 
-## 5. Adapting it to your application
+## 6. Adapting it to your application
 
 1. Copy the `sample-config` folder under a new name and change `id` and `name` in `application.yaml`.
-2. Replace the environment values with your addresses.
-3. Put your certificate files in `assets/certs` and update the file names in the auth profiles.
-4. Replace literal secrets with `{{$env.NAME}}` references.
-5. Edit the scenario's URLs, methods, headers and expectations, then run `validate` and `run`.
+2. List your environments with their addresses and hosts.
+3. Put your certificate files in `assets/certs` and name them in a certificate set, with per-environment files where they differ.
+4. Keep the auth profiles you need, point them at your identity provider, and replace literal secrets with `{{$env.NAME}}` references.
+5. Edit the scenario's URLs, methods, headers and expectations, then run `validate` and `run` for each environment.

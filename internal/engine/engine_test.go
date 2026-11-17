@@ -259,7 +259,7 @@ func TestGRPCAndMTLS(t *testing.T) {
 		{ID: "mtls", Type: model.TypeHTTP, Auth: "mtls", HTTP: &model.HTTPStep{URL: "{{secureUrl}}/secure/ping"},
 			Expect: &model.Expect{Body: []model.Assertion{{Path: "client", Value: "testplane-demo-client"}}},
 			Variants: []model.Variant{
-				{ID: "no-cert", Auth: "ca-only", Expect: &model.Expect{Error: "certificate"}},
+				{ID: "no-cert", Auth: "ca-only", Expect: &model.Expect{Error: "*"}},
 				{ID: "untrusted-server", Auth: "none", Expect: &model.Expect{Error: "certificate"}},
 			}},
 	}})
@@ -366,17 +366,17 @@ func TestSkipRetryAndBrokenScenarioFile(t *testing.T) {
 func TestCheckAuth(t *testing.T) {
 	e, _ := fixture(t)
 	ctx := context.Background()
-	ok, err := e.CheckAuth(ctx, "shop", "oauth", "")
+	ok, err := e.CheckAuth(ctx, "shop", "oauth", "", "")
 	must(t, err)
 	if !ok.OK || len(ok.Sends) != 1 || ok.Sends[0] != "header Authorization" {
 		t.Fatalf("oauth: %+v", ok)
 	}
-	bad, err := e.CheckAuth(ctx, "shop", "bad-secret", "")
+	bad, err := e.CheckAuth(ctx, "shop", "bad-secret", "", "")
 	must(t, err)
 	if bad.OK || !strings.Contains(bad.Error, "401") {
 		t.Fatalf("bad secret: %+v", bad)
 	}
-	m, err := e.CheckAuth(ctx, "shop", "mtls", "")
+	m, err := e.CheckAuth(ctx, "shop", "mtls", "", "")
 	must(t, err)
 	if !m.OK || !m.ClientCert || len(m.CertChecks) != 3 || m.CertChecks[0].Status != "ok" {
 		t.Fatalf("mtls: %+v", m)

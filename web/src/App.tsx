@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, connections, slug, uniqueId } from './api'
 import { Backends } from './Backends'
 import { History } from './History'
-import type { Application, Asset, AuthProfile, RunResult, Scenario } from './types'
+import type { Application, Asset, AuthProfile, CertSet, RunResult, Scenario } from './types'
 import { AuthPanel } from './AuthPanel'
 import { EnvPanel } from './EnvPanel'
 import { RunView } from './RunView'
@@ -44,6 +44,8 @@ export default function App() {
   const [newApp, setNewApp] = useState('')
   const [newScenario, setNewScenario] = useState('')
   const [others, setOthers] = useState<AuthProfile[]>([])
+  const [sets, setSets] = useState<CertSet[]>([])
+  const [otherSets, setOtherSets] = useState<CertSet[]>([])
   const [showBackends, setShowBackends] = useState(false)
   const [backend, setBackend] = useState(connections.current())
   const top = useAction()
@@ -74,17 +76,23 @@ export default function App() {
   const app = apps?.find(a => a.id === route.app)
   const loadAppData = useCallback(async () => {
     if (!route.app) return
-    const [s, p, a] = await Promise.all([api.scenarios(route.app), api.auth(route.app), api.assets(route.app)])
-    setScenarios(s); setProfiles(p); setAssets(a)
-    // Profiles of the other applications, usable in flow scenarios as "app/profile".
+    // Certificate checks are for the environment selected at the top.
+    const [s, p, a, c] = await Promise.all([api.scenarios(route.app), api.auth(route.app, env), api.assets(route.app), api.certSets(route.app, env)])
+    setScenarios(s); setProfiles(p); setAssets(a); setSets(c)
+    // Assets of the other applications, usable in flow scenarios as "app/id".
     const rest = (apps || []).filter(o => o.id !== route.app)
-    const lists = await Promise.all(rest.map(o => api.auth(o.id).catch(() => [] as AuthProfile[])))
-    setOthers(lists.flatMap((list, i) => list.filter(x => !x.description?.startsWith('INVALID: ')).map(x => ({ ...x, id: rest[i].id + '/' + x.id, name: `${rest[i].name || rest[i].id} / ${x.name || x.id}` }))))
-  }, [route.app, apps])
+    const label = (i: number, n: string) => `${rest[i].name || rest[i].id} / ${n}`
+    const lists = await Promise.all(rest.map(o => api.auth(o.id, env).catch(() => [] as AuthProfile[])))
+    setOthers(lists.flatMap((list, i) => list.filter(x => !x.description?.startsWith('INVALID: ')).map(x => ({ ...x, id: rest[i].id + '/' + x.id, name: label(i, x.name || x.id) }))))
+    const setLists = await Promise.all(rest.map(o => api.certSets(o.id, env).catch(() => [] as CertSet[])))
+    setOtherSets(setLists.flatMap((list, i) => list.filter(x => !x.description?.startsWith('INVALID: ')).map(x => ({ ...x, id: rest[i].id + '/' + x.id, name: label(i, x.name || x.id) }))))
+  }, [route.app, apps, env])
   useEffect(() => {
-    setScenarios([]); setProfiles([]); setAssets([]); setLastRun(null)
-    if (app) top.run(loadAppData)
+    setScenarios([]); setProfiles([]); setAssets([]); setSets([]); setLastRun(null)
   }, [app?.id]) // eslint-disable-line
+  const appEnv = app ? app.defaultEnvironment || Object.keys(app.environments || {})[0] || '' : ''
+  const envReady = !!app && (env === appEnv || Object.keys(app.environments || {}).includes(env))
+  useEffect(() => { if (app && envReady) top.run(loadAppData) }, [app?.id, env, envReady]) // eslint-disable-line
   useEffect(() => { setEnv(app?.defaultEnvironment || Object.keys(app?.environments || {})[0] || '') }, [app?.id, app?.defaultEnvironment]) // eslint-disable-line
 
   const createApp = () => top.run(async () => {
@@ -158,7 +166,7 @@ export default function App() {
             </header>
             {runAct.error && <Notice kind="error" onClose={() => runAct.setError('')}>{runAct.error}</Notice>}
             <div className="tabs" role="tablist">
-              {([['scenarios', `Scenarios (${scenarios.length})`], ['auth', `Auth & assets (${profiles.length})`], ['settings', 'Environments & settings'], ['runs', 'Runs']] as [Tab, string][]).map(([t, label]) => (
+              {([['scenarios', `Scenarios (${scenarios.length})`], ['auth', `Auth & assets (${profiles.length + sets.length})`], ['settings', 'Environments & settings'], ['runs', 'Runs']] as [Tab, string][]).map(([t, label]) => (
                 <button type="button" role="tab" aria-selected={route.tab === t} key={t} className={route.tab === t ? 'on' : ''} onClick={() => go({ app: app.id, tab: t })}>{label}</button>
               ))}
             </div>
@@ -181,13 +189,13 @@ export default function App() {
                 </div>
                 <div className="detail">
                   {route.item && selected
-                    ? <ScenarioEditor key={backend.id + route.item} app={app} scenarioId={route.item} profiles={[...profiles, ...others]} protos={assets.filter(a => a.category === 'protos').map(a => a.name)} env={env}
+                    ? <ScenarioEditor key={backend.id + route.item} app={app} scenarioId={route.item} profiles={[...profiles, ...others]} sets={[...sets, ...otherSets]} protos={assets.filter(a => a.category === 'protos').map(a => a.name)} env={env}
                         onSaved={() => loadAppData()} onDeleted={async () => { await loadAppData(); go({ app: app.id, tab: 'scenarios' }) }} />
                     : <p className="muted">{route.item && scenarios.length ? `Scenario “${route.item}” does not exist.` : 'Select a scenario, or create one.'}</p>}
                 </div>
               </div>
             )}
-            {route.tab === 'auth' && <AuthPanel key={backend.id + app.id} app={app} profiles={profiles} assets={assets} env={env} reload={loadAppData} />}
+            {route.tab === 'auth' && <AuthPanel key={backend.id + app.id} app={app} profiles={profiles} sets={sets} assets={assets} env={env} reload={loadAppData} />}
             {route.tab === 'settings' && <EnvPanel key={backend.id + app.id} app={app} profiles={profiles} onSaved={() => loadApps()} onDeleted={async () => { await loadApps(); go({ tab: 'scenarios' }) }} />}
             {route.tab === 'runs' && <RunsPanel app={app} latest={lastRun} />}
           </>

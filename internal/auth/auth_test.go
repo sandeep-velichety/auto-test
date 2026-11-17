@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -157,5 +158,92 @@ func TestCertChecksSayWhatIsMissing(t *testing.T) {
 	}
 	if _, err := NewResolver(dir).Resolve(context.Background(), mismatch); err == nil {
 		t.Fatal("a mismatched key pair must not resolve")
+	}
+}
+
+func TestHeadersAndCustomTokenCall(t *testing.T) {
+	var got struct {
+		method, path, query, ctype, body, clientHeader string
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got.method, got.path, got.query, got.ctype, got.body, got.clientHeader = r.Method, r.URL.Path, r.URL.RawQuery, r.Header.Get("Content-Type"), string(b), r.Header.Get("X-Client")
+		switch r.URL.Path {
+		case "/denied":
+			http.Error(w, `{"error":"nope"}`, 403)
+		case "/header":
+			w.Header().Set("X-Session", "sess-9")
+			w.WriteHeader(204)
+		default:
+			_, _ = w.Write([]byte(`{"result":{"session":{"token":"tok-77"}}}`))
+		}
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+	r := NewResolver(t.TempDir())
+
+	c, err := r.Resolve(ctx, &model.AuthProfile{ID: "h", Type: model.AuthHeaders, Headers: map[string]string{"X-Api-Key": "k", "X-Tenant": "acme", "X-Empty": ""}})
+	if err != nil || c.Headers["X-Api-Key"] != "k" || c.Headers["X-Tenant"] != "acme" || len(c.Headers) != 2 {
+		t.Fatalf("headers profile: %+v %v", c, err)
+	}
+	if _, err := r.Resolve(ctx, &model.AuthProfile{ID: "h0", Type: model.AuthHeaders}); err == nil {
+		t.Fatal("a headers profile without headers must fail")
+	}
+	// Fixed headers ride along with any type and can replace what it sets.
+	c, _ = r.Resolve(ctx, &model.AuthProfile{ID: "b", Type: model.AuthBearer, Bearer: &model.BearerAuth{Token: "t"}, Headers: map[string]string{"X-Tenant": "acme"}})
+	if c.Headers["Authorization"] != "Bearer t" || c.Headers["X-Tenant"] != "acme" {
+		t.Fatalf("bearer + headers: %v", c.Headers)
+	}
+
+	call := &model.AuthProfile{ID: "call", Type: model.AuthHTTPCall, HTTPCall: &model.HTTPCallAuth{
+		URL: srv.URL + "/login", Query: map[string]string{"realm": "alpha"}, Headers: map[string]string{"X-Client": "qa"},
+		Body: map[string]any{"user": "u", "pass": "p"}, TokenPath: "result.session.token"}}
+	c, err = r.Resolve(ctx, call)
+	if err != nil || c.Headers["Authorization"] != "Bearer tok-77" {
+		t.Fatalf("custom call: %+v %v", c, err)
+	}
+	if got.method != "POST" || got.path != "/login" || got.query != "realm=alpha" || got.ctype != "application/json" || got.clientHeader != "qa" || !strings.Contains(got.body, `"user":"u"`) {
+		t.Fatalf("request sent: %+v", got)
+	}
+	c, err = r.Resolve(ctx, &model.AuthProfile{ID: "form", Type: model.AuthHTTPCall, HTTPCall: &model.HTTPCallAuth{
+		Method: "put", URL: srv.URL + "/login", Form: map[string]string{"grant": "x"}, TokenPath: "result.session.token", HeaderName: "X-Session-Token", Prefix: "none"}})
+	if err != nil || c.Headers["X-Session-Token"] != "tok-77" || got.method != "PUT" || got.ctype != "application/x-www-form-urlencoded" || got.body != "grant=x" {
+		t.Fatalf("form call: %+v %v / %+v", c, err, got)
+	}
+	c, err = r.Resolve(ctx, &model.AuthProfile{ID: "hdr", Type: model.AuthHTTPCall, HTTPCall: &model.HTTPCallAuth{Method: "GET", URL: srv.URL + "/header", TokenPath: "$header.X-Session"}})
+	if err != nil || c.Headers["Authorization"] != "Bearer sess-9" {
+		t.Fatalf("token from a response header: %+v %v", c, err)
+	}
+	for name, h := range map[string]*model.HTTPCallAuth{
+		"rejected":      {URL: srv.URL + "/denied"},
+		"missing token": {URL: srv.URL + "/login", TokenPath: "nope"},
+		"bad url":       {URL: "not a url"},
+		"no url":        {},
+	} {
+		if _, err := r.Resolve(ctx, &model.AuthProfile{ID: "e-" + strings.ReplaceAll(name, " ", "-"), Type: model.AuthHTTPCall, HTTPCall: h}); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+	if _, err := r.Resolve(ctx, &model.AuthProfile{ID: "e-rejected-2", Type: model.AuthHTTPCall, HTTPCall: &model.HTTPCallAuth{URL: srv.URL + "/denied"}}); err == nil || !strings.Contains(err.Error(), "answered 403") {
+		t.Errorf("rejected call message: %v", err)
+	}
+}
+
+func TestTypeNoneStillLoadsItsTLS(t *testing.T) {
+	dir := t.TempDir()
+	certs, _ := demo.NewCerts()
+	_ = certs.WriteClientFiles(dir)
+	c, err := NewResolver(dir).Resolve(context.Background(), &model.AuthProfile{ID: "trust", Type: model.AuthNone, TLS: &model.TLSSettings{CA: "demo-ca.crt"}})
+	if err != nil || c.TLS == nil || c.TLS.RootCAs == nil || len(c.TLS.Certificates) != 0 {
+		t.Fatalf("a CA-only profile must trust that CA and present nothing: %+v %v", c, err)
+	}
+	// Same profile, different certificate folders and keys: no cache mix-up.
+	r := NewResolver("")
+	p := &model.AuthProfile{ID: "m", Type: model.AuthMTLS, TLS: &model.TLSSettings{Cert: "demo-client.crt", Key: "demo-client.key"}}
+	if _, err := r.ResolveIn(context.Background(), p, dir, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ResolveIn(context.Background(), p, t.TempDir(), "b"); err == nil {
+		t.Fatal("files are missing in the second folder; a different key must not reuse the first result")
 	}
 }
