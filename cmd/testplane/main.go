@@ -38,6 +38,9 @@ Usage:
   testplane run       --workspace DIR --app ID [options]      run tests headless (CI/CD)
   testplane validate  --workspace DIR [--app ID]              check YAML and auth assets
   testplane list      --workspace DIR                         list applications and scenarios
+  testplane export    --workspace DIR --app ID [--scenario ID] [--out FILE]
+                                                              one scenario as YAML, or the application as a zip
+  testplane import    --workspace DIR [--app ID] FILE         a scenario YAML into an application, or an application zip
   testplane demo      [--workspace DIR]                       start a sample system to test against
   testplane version
 
@@ -92,6 +95,10 @@ func main() {
 		os.Exit(validate(args))
 	case "list":
 		list(args)
+	case "export":
+		os.Exit(exportCmd(args))
+	case "import":
+		os.Exit(importCmd(args))
 	case "demo":
 		runDemo(args)
 	case "version", "--version", "-v":
@@ -418,6 +425,95 @@ func list(args []string) {
 			fmt.Printf("  %-30s %d test(s)  %s\n", sc.ID, len(sc.Tests), strings.Join(sc.Tags, ","))
 		}
 	}
+}
+
+func exportCmd(args []string) int {
+	fs := flag.NewFlagSet("export", flag.ExitOnError)
+	ws := workspaceFlag(fs)
+	app := fs.String("app", "", "application id (required)")
+	scenario := fs.String("scenario", "", "export this scenario with the auth profiles and certificate sets it uses, as YAML (default: the whole application as a zip)")
+	out := fs.String("out", "", "file to write (default: <scenario>.scenario.yaml or <app>.zip; - for standard output)")
+	_ = fs.Parse(args)
+	if *app == "" {
+		fmt.Fprintln(os.Stderr, "error: --app is required")
+		return 2
+	}
+	st := store.New(*ws)
+	var data []byte
+	var err error
+	name := *app + ".zip"
+	if *scenario != "" {
+		name = *scenario + ".scenario.yaml"
+		data, err = st.ExportScenario(*app, *scenario)
+	} else {
+		var buf bytes.Buffer
+		err = st.ExportApp(*app, &buf, false)
+		data = buf.Bytes()
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 2
+	}
+	if *out == "-" {
+		_, _ = os.Stdout.Write(data)
+		return 0
+	}
+	if *out != "" {
+		name = *out
+	}
+	if err := os.WriteFile(name, data, 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 2
+	}
+	fmt.Println("wrote", name)
+	return 0
+}
+
+func importCmd(args []string) int {
+	fs := flag.NewFlagSet("import", flag.ExitOnError)
+	ws := workspaceFlag(fs)
+	app := fs.String("app", "", "application to import a scenario into (not needed for an application zip)")
+	overwrite := fs.Bool("overwrite", false, "replace a scenario that already exists")
+	_ = fs.Parse(args)
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "error: give exactly one file to import")
+		return 2
+	}
+	data, err := os.ReadFile(fs.Arg(0))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 2
+	}
+	st := store.New(*ws)
+	if bytes.HasPrefix(data, []byte("PK")) {
+		id, err := st.ImportApp(data)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return 2
+		}
+		fmt.Println("imported application", id)
+		return 0
+	}
+	if *app == "" {
+		fmt.Fprintln(os.Stderr, "error: --app is required to import a scenario")
+		return 2
+	}
+	res, err := st.ImportScenario(*app, data, *overwrite)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 2
+	}
+	fmt.Printf("imported scenario %s into %s\n", res.Scenario, *app)
+	for _, c := range res.Created {
+		fmt.Println("  created", c)
+	}
+	for _, k := range res.Kept {
+		fmt.Println("  kept existing", k)
+	}
+	for _, m := range res.Missing {
+		fmt.Println("  still needed:", m)
+	}
+	return 0
 }
 
 func runDemo(args []string) {

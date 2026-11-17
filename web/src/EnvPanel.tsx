@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { api } from './api'
+import { api, download } from './api'
 import type { Application, AuthProfile } from './types'
 import { Field, KV, Notice, Select, Text, useAction } from './widgets'
 
@@ -61,10 +61,7 @@ export function EnvPanel({ app, profiles, onSaved, onDeleted }: { app: Applicati
       <h3>Share or remove</h3>
       <div className="row">
         <button type="button" disabled={act.busy} onClick={() => act.run(async () => {
-          const url = URL.createObjectURL(await api.exportApp(a.id))
-          const link = document.createElement('a')
-          link.href = url; link.download = a.id + '.zip'; link.click()
-          setTimeout(() => URL.revokeObjectURL(url), 1000)
+          download(await api.exportApp(a.id), a.id + '.zip')
         })}>Download as zip</button>
         <span className="hint">Scenarios, auth profiles and certificates. Private keys are left out and stored secrets are replaced with CHANGE_ME.</span>
       </div>

@@ -1,6 +1,7 @@
-import type { AuthProfile, Assertion, CertSet, Expect, Test, TestType, Variant } from './types'
+import { useState } from 'react'
+import type { AuthProfile, Assertion, CertSet, Expect, GrpcService, Test, TestType, Variant } from './types'
 import { uniqueId } from './api'
-import { Badge, Check, Field, JsonField, KV, Num, Section, Select, Text } from './widgets'
+import { Badge, Check, Field, JsonField, KV, Notice, Num, Section, Select, Text, useAction } from './widgets'
 
 const OPS = ['equals', 'not_equals', 'contains', 'not_contains', 'matches', 'exists', 'not_exists', 'gt', 'gte', 'lt', 'lte', 'length', 'in']
 const GRPC_CODES = ['', 'OK', 'CANCELLED', 'UNKNOWN', 'INVALID_ARGUMENT', 'DEADLINE_EXCEEDED', 'NOT_FOUND', 'ALREADY_EXISTS', 'PERMISSION_DENIED',
@@ -97,7 +98,38 @@ export function ExpectEditor({ type, kind, value, onChange }: { type: TestType; 
   )
 }
 
-function StepFields({ type, step, set, protos }: { type: TestType; step: any; set: (patch: any) => void; protos: string[] }) {
+/** Lists the target's services (reflection or .proto files) and fills in the chosen method. */
+function GrpcPicker({ step, set, describe }: { step: any; set: (patch: any) => void; describe?: (step: any) => Promise<GrpcService[]> }) {
+  const [services, setServices] = useState<GrpcService[] | null>(null)
+  const act = useAction()
+  if (!describe) return null
+  const methods = (services || []).flatMap(s => s.methods)
+  const current = methods.find(m => m.fullName === step.method)
+  return (
+    <div className="picker">
+      <div className="row">
+        <button type="button" disabled={act.busy} onClick={() => act.run(async () => setServices(await describe(step)))}>{act.busy ? 'Asking the service…' : services ? 'Reload services' : 'Load services and methods'}</button>
+        {services && (
+          <select aria-label="Method" value={current ? current.fullName : ''} onChange={e => {
+            const m = methods.find(x => x.fullName === e.target.value)
+            if (m) set({ method: m.fullName, message: step.message === undefined || confirm('Replace the request message with an empty template for this method?') ? m.template : step.message })
+          }}>
+            <option value="">{methods.length ? 'Choose a method…' : 'No services found'}</option>
+            {(services || []).map(s => (
+              <optgroup key={s.name} label={s.name}>
+                {s.methods.map(m => <option key={m.fullName} value={m.fullName}>{m.name}{m.clientStreaming || m.serverStreaming ? ` (${[m.clientStreaming && 'client', m.serverStreaming && 'server'].filter(Boolean).join(' + ')} streaming)` : ''}</option>)}
+              </optgroup>
+            ))}
+          </select>
+        )}
+      </div>
+      {act.error && <Notice kind="error" onClose={() => act.setError('')}>Could not list services: {act.error}</Notice>}
+      {current && <span className="hint">Request <code>{current.inputType}</code> → response <code>{current.outputType}</code>.{current.serverStreaming ? ' Server streaming: the result is {responses: […]}.' : ''}{current.clientStreaming ? ' Client streaming: give the message as a JSON list to send several.' : ''}</span>}
+    </div>
+  )
+}
+
+function StepFields({ type, step, set, protos, describe }: { type: TestType; step: any; set: (patch: any) => void; protos: string[]; describe?: (step: any) => Promise<GrpcService[]> }) {
   const s = step || {}
   switch (type) {
     case 'http':
@@ -123,11 +155,12 @@ function StepFields({ type, step, set, protos }: { type: TestType; step: any; se
             <Field label="Timeout (ms)"><Num value={s.timeoutMs} onChange={timeoutMs => set({ timeoutMs })} placeholder="30000" /></Field>
           </div>
           <Check label="Plaintext (no TLS)" value={s.plaintext} onChange={plaintext => set({ plaintext })} />
+          <GrpcPicker step={s} set={set} describe={describe} />
           <Field label="Proto files" wide hint={protos.length ? 'Comma separated file names from this application’s protos. Leave empty to use server reflection.' : 'Empty = server reflection. Upload .proto files under Auth & assets to use them here.'}>
             <Text mono value={(s.protoFiles || []).join(', ')} onChange={v => set({ protoFiles: v.split(',').map((p: string) => p.trim()).filter(Boolean) })} placeholder={protos.join(', ')} />
           </Field>
           <Field group label="Metadata" wide><KV value={s.metadata} onChange={metadata => set({ metadata })} keyLabel="key" addLabel="Add metadata" /></Field>
-          <Field label="Request message (JSON)" wide><JsonField value={s.message} onChange={message => set({ message })} /></Field>
+          <Field label="Request message (JSON)" wide><JsonField key={s.method} value={s.message} onChange={message => set({ message })} /></Field>
         </>
       )
     case 'kafka':
@@ -284,8 +317,9 @@ function VariantEditor({ type, v, onChange, onRemove, profiles, inherited, sets,
   )
 }
 
-export function TestEditor({ test, onChange, profiles, inheritedAuth, protos, sets, inheritedMtls }: {
+export function TestEditor({ test, onChange, profiles, inheritedAuth, protos, sets, inheritedMtls, describeGrpc }: {
   test: Test; onChange: (t: Test) => void; profiles: AuthProfile[]; inheritedAuth: string; protos: string[]; sets: CertSet[]; inheritedMtls: string
+  describeGrpc?: (step: any, auth: string, mtls: string) => Promise<GrpcService[]>
 }) {
   const set = (patch: Partial<Test>) => onChange({ ...test, ...patch })
   const kind = test.kind || 'positive'
@@ -313,7 +347,7 @@ export function TestEditor({ test, onChange, profiles, inheritedAuth, protos, se
       </div>
 
       <Section title={TYPE_LABEL[test.type]} open>
-        <StepFields type={test.type} step={(test as any)[test.type]} protos={protos} set={patch => set({ [test.type]: { ...((test as any)[test.type] || {}), ...patch } } as any)} />
+        <StepFields type={test.type} step={(test as any)[test.type]} protos={protos} describe={describeGrpc ? step => describeGrpc(step, test.auth || inheritedAuth, test.mtls || inheritedMtls) : undefined} set={patch => set({ [test.type]: { ...((test as any)[test.type] || {}), ...patch } } as any)} />
       </Section>
 
       <Section title="Expect" open count={(test.expect?.body?.length || 0)}>

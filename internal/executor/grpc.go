@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/fullstorydev/grpcurl"
+	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/grpcreflect"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -21,14 +22,9 @@ import (
 	"github.com/testplane/testplane/internal/model"
 )
 
-// GRPC invokes one RPC. The service description comes from .proto files in
-// the application's assets when the step names any, otherwise from server
-// reflection. A non-OK status is a normal result, not an error, so negative
-// tests can assert on it.
-func GRPC(ctx context.Context, s *model.GRPCStep, creds *auth.Credentials, protosDir string) (*model.Response, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout(s.TimeoutMs, 30000))
-	defer cancel()
-
+// grpcSource connects to the target and finds the service description:
+// .proto files when the step names any, otherwise server reflection.
+func grpcSource(ctx context.Context, s *model.GRPCStep, creds *auth.Credentials, protosDir string) (*grpc.ClientConn, grpcurl.DescriptorSource, []string, func(), error) {
 	var tc credentials.TransportCredentials
 	if s.Plaintext {
 		tc = insecure.NewCredentials()
@@ -39,9 +35,14 @@ func GRPC(ctx context.Context, s *model.GRPCStep, creds *auth.Credentials, proto
 	}
 	cc, err := grpc.NewClient(s.Target, grpc.WithTransportCredentials(tc))
 	if err != nil {
-		return nil, fmt.Errorf("dial %s: %w", s.Target, err)
+		return nil, nil, nil, nil, fmt.Errorf("dial %s: %w", s.Target, err)
 	}
-	defer cc.Close()
+	closers := []func(){func() { cc.Close() }}
+	closeAll := func() {
+		for i := len(closers) - 1; i >= 0; i-- {
+			closers[i]()
+		}
+	}
 
 	var headers []string
 	for k, v := range creds.Headers {
@@ -57,25 +58,118 @@ func GRPC(ctx context.Context, s *model.GRPCStep, creds *auth.Credentials, proto
 	if len(s.ProtoFiles) > 0 {
 		for _, f := range s.ProtoFiles {
 			if !model.ValidFileName(f) {
-				return nil, fmt.Errorf("proto file %q must be a plain file name in assets/protos", f)
+				closeAll()
+				return nil, nil, nil, nil, fmt.Errorf("proto file %q must be a plain file name in assets/protos", f)
 			}
 		}
 		src, err = grpcurl.DescriptorSourceFromProtoFiles([]string{filepath.Clean(protosDir)}, s.ProtoFiles...)
 		if err != nil {
-			return nil, fmt.Errorf("load proto files: %w", err)
+			closeAll()
+			return nil, nil, nil, nil, fmt.Errorf("load proto files: %w", err)
 		}
 	} else {
 		refClient := grpcreflect.NewClientAuto(ctx, cc)
-		defer refClient.Reset()
+		closers = append(closers, refClient.Reset)
 		src = grpcurl.DescriptorSourceFromServer(ctx, refClient)
 	}
 
+	return cc, src, headers, closeAll, nil
+}
+
+// GRPCMethod describes one RPC for the method picker.
+type GRPCMethod struct {
+	Name            string `json:"name"`     // Check
+	FullName        string `json:"fullName"` // grpc.health.v1.Health/Check
+	InputType       string `json:"inputType"`
+	OutputType      string `json:"outputType"`
+	ClientStreaming bool   `json:"clientStreaming,omitempty"`
+	ServerStreaming bool   `json:"serverStreaming,omitempty"`
+	Template        any    `json:"template"` // an example request with every field present
+}
+
+// GRPCService is one service and its methods.
+type GRPCService struct {
+	Name    string       `json:"name"`
+	Methods []GRPCMethod `json:"methods"`
+}
+
+// GRPCDescribe lists the services and methods a target offers, with a
+// request template for each method.
+func GRPCDescribe(ctx context.Context, s *model.GRPCStep, creds *auth.Credentials, protosDir string) ([]GRPCService, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout(s.TimeoutMs, 20000))
+	defer cancel()
+	_, src, _, closeAll, err := grpcSource(ctx, s, creds, protosDir)
+	if err != nil {
+		return nil, err
+	}
+	defer closeAll()
+	names, err := grpcurl.ListServices(src)
+	if err != nil {
+		return nil, fmt.Errorf("list services of %s: %w", s.Target, err)
+	}
+	_, formatter, err := grpcurl.RequestParserAndFormatter(grpcurl.FormatJSON, src, strings.NewReader(""), grpcurl.FormatOptions{EmitJSONDefaultFields: true})
+	if err != nil {
+		return nil, err
+	}
+	out := []GRPCService{}
+	for _, name := range names {
+		// The reflection service describes itself; nobody tests it.
+		if strings.HasPrefix(name, "grpc.reflection.") {
+			continue
+		}
+		d, err := src.FindSymbol(name)
+		if err != nil {
+			return nil, fmt.Errorf("describe %s: %w", name, err)
+		}
+		sd, ok := d.(*desc.ServiceDescriptor)
+		if !ok {
+			continue
+		}
+		svc := GRPCService{Name: name, Methods: []GRPCMethod{}}
+		for _, m := range sd.GetMethods() {
+			gm := GRPCMethod{Name: m.GetName(), FullName: name + "/" + m.GetName(), InputType: m.GetInputType().GetFullyQualifiedName(), OutputType: m.GetOutputType().GetFullyQualifiedName(),
+				ClientStreaming: m.IsClientStreaming(), ServerStreaming: m.IsServerStreaming(), Template: map[string]any{}}
+			if text, err := formatter(grpcurl.MakeTemplate(m.GetInputType())); err == nil {
+				var tpl any
+				if json.Unmarshal([]byte(text), &tpl) == nil {
+					gm.Template = tpl
+				}
+			}
+			svc.Methods = append(svc.Methods, gm)
+		}
+		out = append(out, svc)
+	}
+	return out, nil
+}
+
+// GRPC invokes one RPC. The service description comes from .proto files in
+// the application's assets when the step names any, otherwise from server
+// reflection. A non-OK status is a normal result, not an error, so negative
+// tests can assert on it.
+func GRPC(ctx context.Context, s *model.GRPCStep, creds *auth.Credentials, protosDir string) (*model.Response, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout(s.TimeoutMs, 30000))
+	defer cancel()
+
+	cc, src, headers, closeAll, err := grpcSource(ctx, s, creds, protosDir)
+	if err != nil {
+		return nil, err
+	}
+	defer closeAll()
+
 	msg := "{}"
 	if s.Message != nil {
-		if str, ok := s.Message.(string); ok {
-			msg = str
-		} else {
-			msg = mustJSON(s.Message)
+		switch m := s.Message.(type) {
+		case string:
+			msg = m
+		case []any:
+			// A list sends one message per element (client streaming).
+			parts := make([]string, len(m))
+			for i, item := range m {
+				parts[i] = mustJSON(item)
+			}
+			msg = strings.Join(parts, "\n")
+		default:
+			msg = mustJSON(m)
 		}
 	}
 	parser, formatter, err := grpcurl.RequestParserAndFormatter(grpcurl.FormatJSON, src, strings.NewReader(msg), grpcurl.FormatOptions{EmitJSONDefaultFields: true})

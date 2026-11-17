@@ -39,7 +39,26 @@ Headless, as a pipeline would run it:
 | `--publish URL` | send the result to a backend's history (token from `TESTPLANE_TOKEN`) |
 | `--by NAME` | who or what started the run; recorded with it |
 
+Moving tests around:
+
+```bash
+./bin/testplane export --workspace W --app orders --scenario order-lifecycle    # one YAML file: the scenario plus the auth profiles and certificate sets it uses
+./bin/testplane import --workspace W2 --app orders order-lifecycle.scenario.yaml
+./bin/testplane export --workspace W --app orders                               # the whole application as a zip
+```
+
+In the UI the same things are "Download YAML" on a scenario and "Import…" above the scenario list. Exports never contain private keys, and stored secrets are replaced with `CHANGE_ME`. An import creates only what the receiving application lacks; existing auth profiles and certificate sets are kept as they are.
+
 The workspace can also be set with `TESTPLANE_WORKSPACE`. A ready-made GitHub Actions job is in `.github/workflows/ci.yml`, and a `Dockerfile` is included.
+
+## Writing tests faster
+
+- **gRPC:** in a gRPC step, "Load services and methods" asks the service (server reflection, or uploaded `.proto` files) what it offers; picking a method fills in the method name and an empty request message. Unary, server-streaming and client-streaming calls are supported, with metadata, auth and mutual TLS.
+- **Run to this step:** the ▶ button on a step runs the scenario up to and including it, so a step can be tried while it is being written. These partial runs are not stored in history.
+- **Paste cURL:** turns a curl command into an HTTP step.
+- **Status at a glance:** each scenario shows its latest result in the list, and each step shows its result after a run.
+
+Why the UI is shaped this way, compared with other tools, is in [docs/ui-decisions.md](docs/ui-decisions.md).
 
 ## Backends
 

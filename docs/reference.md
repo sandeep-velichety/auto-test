@@ -197,6 +197,8 @@ grpc:
 
 The result document is the response message as JSON. A non-OK status is a normal result: assert it with `expect.code`.
 
+Streaming: a server-streaming method returns `{responses: [...]}` when it sends more than one message. For a client-streaming method, give `message` as a list and each element is sent in turn.
+
 ### kafka
 
 ```yaml
@@ -344,11 +346,14 @@ All under `/api`; bodies are JSON unless noted. When the backend was started wit
 | `GET /apps`, `GET/PUT/DELETE /apps/{app}` | applications |
 | `GET /apps/{app}/scenarios`, `GET/PUT/DELETE /apps/{app}/scenarios/{id}` | scenarios |
 | `GET/PUT /apps/{app}/scenarios/{id}/yaml` | the stored file, as text |
+| `GET /apps/{app}/scenarios/{id}/export` | the scenario with the auth profiles and certificate sets it uses, as one YAML file (secrets replaced) |
+| `POST /apps/{app}/scenarios/import?overwrite=` | body: that file, or a plain scenario YAML; creates only missing profiles and sets |
+| `POST /apps/{app}/grpc/describe` | `{environment, auth, mtls, target, plaintext, protoFiles}`; lists services and methods with request templates |
 | `GET /apps/{app}/tls?env=`, `PUT/DELETE /apps/{app}/tls/{id}` | certificate sets, with file checks for that environment |
 | `GET /apps/{app}/auth?env=`, `PUT/DELETE /apps/{app}/auth/{id}` | auth profiles; secrets come back as `********`, and sending `********` keeps the stored value |
 | `POST /apps/{app}/auth/{id}/check?env=&mtls=` | try a profile as a run in that environment would, optionally with a certificate set |
 | `GET /apps/{app}/assets`, `PUT/DELETE /apps/{app}/assets/{certs\|protos}/{name}` | files (raw body on upload); contents are never returned |
-| `POST /apps/{app}/run` | `{environment, scenarios, tags, kind, vars}`; runs, stores and returns the result |
+| `POST /apps/{app}/run` | `{environment, scenarios, tags, kind, vars, until}`; runs, stores and returns the result. `until` stops each scenario after that test id and does not store the run |
 | `GET /apps/{app}/runs?scenario=&status=&env=&from=&to=&limit=` | history, newest first, without test detail; dates are `YYYY-MM-DD` or RFC 3339; with `scenario`, status and totals describe that scenario |
 | `GET /apps/{app}/runs/{id}` | one run in full |
 | `POST /apps/{app}/runs` | store a result produced elsewhere (`testplane run --publish`) |

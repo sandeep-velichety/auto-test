@@ -1,4 +1,4 @@
-import type { Application, Asset, AuthCheckResult, AuthProfile, Backend, CertSet, RunQuery, RunResult, Scenario } from './types'
+import type { Application, Asset, AuthCheckResult, AuthProfile, Backend, CertSet, GrpcService, RunQuery, RunResult, Scenario } from './types'
 
 // ---- backend connections (kept in this browser only) ----
 
@@ -96,6 +96,11 @@ export const api = {
   scenarios: (app: string) => call<Scenario[]>('GET', `/apps/${e(app)}/scenarios`),
   saveScenario: (app: string, s: Scenario) => call<Scenario>('PUT', `/apps/${e(app)}/scenarios/${e(s.id)}`, s),
   deleteScenario: (app: string, id: string) => call<void>('DELETE', `/apps/${e(app)}/scenarios/${e(id)}`),
+  exportScenario: async (app: string, id: string) => (await send(current, 'GET', `/apps/${e(app)}/scenarios/${e(id)}/export`)).blob(),
+  importScenario: (app: string, yaml: string, overwrite = false) =>
+    call<{ scenario: string; created: string[]; kept: string[]; missing?: string[] }>('POST', `/apps/${e(app)}/scenarios/import?overwrite=${overwrite}`, yaml),
+  describeGrpc: (app: string, req: { environment: string; auth?: string; mtls?: string; target: string; plaintext?: boolean; protoFiles?: string[] }) =>
+    call<GrpcService[]>('POST', `/apps/${e(app)}/grpc/describe`, req),
   scenarioYaml: (app: string, id: string) => call<string>('GET', `/apps/${e(app)}/scenarios/${e(id)}/yaml`, undefined, true),
   saveScenarioYaml: (app: string, id: string, yaml: string) => call<Scenario>('PUT', `/apps/${e(app)}/scenarios/${e(id)}/yaml`, yaml),
 
@@ -111,7 +116,7 @@ export const api = {
   uploadAsset: (app: string, category: string, name: string, data: ArrayBuffer) => call<void>('PUT', `/apps/${e(app)}/assets/${e(category)}/${e(name)}`, data),
   deleteAsset: (app: string, category: string, name: string) => call<void>('DELETE', `/apps/${e(app)}/assets/${e(category)}/${e(name)}`),
 
-  run: (app: string, req: { environment?: string; scenarios?: string[]; kind?: string }) => call<RunResult>('POST', `/apps/${e(app)}/run`, req),
+  run: (app: string, req: { environment?: string; scenarios?: string[]; kind?: string; until?: string }) => call<RunResult>('POST', `/apps/${e(app)}/run`, req),
   runs: (app: string, q: RunQuery = {}) => {
     const p = Object.entries(q).filter(([, v]) => v !== undefined && v !== '').map(([k, v]) => `${k}=${e(String(v))}`).join('&')
     return call<RunResult[]>('GET', `/apps/${e(app)}/runs${p ? '?' + p : ''}`)
@@ -132,4 +137,36 @@ export function uniqueId(base: string, taken: string[]): string {
 export function when(iso: string): string {
   const d = new Date(iso)
   return isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+export function download(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url; link.download = name; link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+/** Turns a pasted curl command into the fields of an HTTP step. */
+export function parseCurl(text: string): { method: string; url: string; headers?: Record<string, string>; body?: any } | null {
+  const src = text.replace(/\\\r?\n/g, ' ').trim()
+  if (!/^curl\b/i.test(src)) return null
+  const words: string[] = []
+  const re = /'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"|(\S+)/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(src))) words.push(m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2].replace(/\\(["\\$`])/g, '$1') : m[3])
+  let method = '', url = '', data: string | undefined
+  const headers: Record<string, string> = {}
+  for (let i = 1; i < words.length; i++) {
+    const w = words[i]
+    if (w === '-X' || w === '--request') method = words[++i] || ''
+    else if (w === '-H' || w === '--header') { const h = words[++i] || ''; const c = h.indexOf(':'); if (c > 0) headers[h.slice(0, c).trim()] = h.slice(c + 1).trim() }
+    else if (['-d', '--data', '--data-raw', '--data-binary', '--data-ascii'].includes(w)) data = words[++i]
+    else if (w === '--url') url = words[++i] || ''
+    else if (['-u', '--user', '-o', '--output', '-A', '--user-agent', '-e', '--referer', '--connect-timeout', '-m', '--max-time', '--cert', '--key', '--cacert'].includes(w)) i++
+    else if (!w.startsWith('-') && !url) url = w
+  }
+  if (!url) return null
+  let body: any = data
+  if (data !== undefined) { try { body = JSON.parse(data) } catch { /* keep as text */ } }
+  return { method: (method || (data !== undefined ? 'POST' : 'GET')).toUpperCase(), url, headers: Object.keys(headers).length ? headers : undefined, body }
 }

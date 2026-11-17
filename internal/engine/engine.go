@@ -30,6 +30,7 @@ type Options struct {
 	Tags      []string          // any-of filter on scenario tags
 	Kind      string            // "", positive (skip negative cases) or negative (skip positive variants)
 	Vars      map[string]string // overrides environment and scenario variables
+	Until     string            // stop each scenario after this test id (and its cases); for trying a step while authoring
 	By        string            // who started the run, recorded with it
 	Source    string            // server | cli
 	// OnTest is called as each test finishes (for live CLI output).
@@ -341,6 +342,9 @@ func (e *Engine) runScenario(ctx context.Context, app *model.Application, sc *mo
 			default:
 				emit(run.runOne(ctx, vs))
 			}
+		}
+		if o.Until != "" && t.ID == o.Until {
+			break
 		}
 	}
 	res.DurationMs = time.Since(start).Milliseconds()

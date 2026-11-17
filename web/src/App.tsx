@@ -7,7 +7,7 @@ import { AuthPanel } from './AuthPanel'
 import { EnvPanel } from './EnvPanel'
 import { RunView } from './RunView'
 import { ScenarioEditor } from './ScenarioEditor'
-import { FileButton, Notice, Select, useAction } from './widgets'
+import { FileButton, Notice, Select, StatusBadge, useAction } from './widgets'
 
 type Tab = 'scenarios' | 'auth' | 'settings' | 'runs'
 interface Route { app?: string; tab: Tab; item?: string }
@@ -43,6 +43,9 @@ export default function App() {
   const [lastRun, setLastRun] = useState<RunResult | null>(null)
   const [newApp, setNewApp] = useState('')
   const [newScenario, setNewScenario] = useState('')
+  const [find, setFind] = useState('')
+  const [last, setLast] = useState<Record<string, { status: string; at: string }>>({})
+  const [notice, setNotice] = useState('')
   const [others, setOthers] = useState<AuthProfile[]>([])
   const [sets, setSets] = useState<CertSet[]>([])
   const [otherSets, setOtherSets] = useState<CertSet[]>([])
@@ -79,6 +82,12 @@ export default function App() {
     // Certificate checks are for the environment selected at the top.
     const [s, p, a, c] = await Promise.all([api.scenarios(route.app), api.auth(route.app, env), api.assets(route.app), api.certSets(route.app, env)])
     setScenarios(s); setProfiles(p); setAssets(a); setSets(c)
+    // Latest result of each scenario, from recent history.
+    api.runs(route.app, { limit: 30 }).then(runs => {
+      const latest: Record<string, { status: string; at: string }> = {}
+      for (const r of runs) for (const sc of r.scenarios) if (!latest[sc.id]) latest[sc.id] = { status: sc.status, at: r.startedAt }
+      setLast(latest)
+    }).catch(() => setLast({}))
     // Assets of the other applications, usable in flow scenarios as "app/id".
     const rest = (apps || []).filter(o => o.id !== route.app)
     const label = (i: number, n: string) => `${rest[i].name || rest[i].id} / ${n}`
@@ -112,6 +121,18 @@ export default function App() {
     if (!app) return
     const r = await api.run(app.id, { environment: env, kind: kind || undefined })
     setLastRun(r); go({ app: app.id, tab: 'runs' })
+  })
+  const importScenario = (f: File) => top.run(async () => {
+    if (!app) return
+    const text = await f.text()
+    let res
+    try { res = await api.importScenario(app.id, text) } catch (e: any) {
+      if (!/already exists/.test(e?.message || '') || !confirm('A scenario with that id already exists here. Replace it?')) throw e
+      res = await api.importScenario(app.id, text, true)
+    }
+    await loadAppData()
+    setNotice(`Imported “${res.scenario}”.` + (res.created.length ? ` Created: ${res.created.join(', ')}.` : '') + (res.kept.length ? ` Kept your existing: ${res.kept.join(', ')}.` : '') + (res.missing?.length ? ` Still needed here: ${res.missing.join(', ')}.` : ''))
+    go({ app: app.id, tab: 'scenarios', item: res.scenario })
   })
   const importZip = (f: File) => top.run(async () => { const r = await api.importApp(await f.arrayBuffer()); await loadApps(); go({ app: r.id, tab: 'scenarios' }) })
 
@@ -174,10 +195,12 @@ export default function App() {
             {route.tab === 'scenarios' && (
               <div className="split">
                 <div className="list">
-                  <div className="list-head"><h3>Scenarios</h3></div>
-                  {scenarios.map(s => (
+                  <div className="list-head"><h3>Scenarios</h3><FileButton label="Import…" accept=".yaml,.yml" onFile={importScenario} /></div>
+                  {notice && <Notice kind="ok" onClose={() => setNotice('')}>{notice}</Notice>}
+                  {scenarios.length > 4 && <input value={find} placeholder="Filter by name or tag" aria-label="Filter scenarios" onChange={e => setFind(e.target.value)} />}
+                  {scenarios.filter(s => !find.trim() || (s.name + ' ' + s.id + ' ' + (s.tags || []).join(' ')).toLowerCase().includes(find.trim().toLowerCase())).map(s => (
                     <button type="button" key={s.id} className={'list-item' + (s.id === route.item ? ' on' : '')} onClick={() => go({ app: app.id, tab: 'scenarios', item: s.id })}>
-                      <span className="result-name">{s.name || s.id}</span>
+                      <span className="result-name">{s.name || s.id} {last[s.id] && <StatusBadge status={last[s.id].status} />}</span>
                       <span className="muted">{s.description?.startsWith('INVALID: ') ? 'file does not parse' : `${(s.tests || []).length} step${(s.tests || []).length === 1 ? '' : 's'}${s.tags?.length ? ' · ' + s.tags.join(', ') : ''}`}</span>
                     </button>
                   ))}

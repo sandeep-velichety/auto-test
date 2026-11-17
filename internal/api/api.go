@@ -244,6 +244,54 @@ func (s *Server) Handler() http.Handler {
 		}
 		w.WriteHeader(204)
 	})
+	// The whole scenario in one file: the scenario plus the auth profiles
+	// and certificate sets it uses.
+	mux.HandleFunc("GET /api/apps/{app}/scenarios/{id}/export", func(w http.ResponseWriter, r *http.Request) {
+		b, err := st.ExportScenario(r.PathValue("app"), r.PathValue("id"))
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+r.PathValue("id")+`.scenario.yaml"`)
+		_, _ = w.Write(b)
+	})
+	mux.HandleFunc("POST /api/apps/{app}/scenarios/import", func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(io.LimitReader(r.Body, 5<<20))
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		res, err := st.ImportScenario(r.PathValue("app"), b, r.URL.Query().Get("overwrite") == "true")
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, res)
+	})
+	// Lists the services and methods of a gRPC target for the method picker.
+	mux.HandleFunc("POST /api/apps/{app}/grpc/describe", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Environment string   `json:"environment"`
+			Auth        string   `json:"auth"`
+			MTLS        string   `json:"mtls"`
+			Target      string   `json:"target"`
+			Plaintext   bool     `json:"plaintext"`
+			ProtoFiles  []string `json:"protoFiles"`
+		}
+		if err := decode(r, &req); err != nil {
+			fail(w, err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
+		defer cancel()
+		out, err := s.Engine.DescribeGRPC(ctx, r.PathValue("app"), req.Environment, req.Auth, req.MTLS, model.GRPCStep{Target: req.Target, Plaintext: req.Plaintext, ProtoFiles: req.ProtoFiles})
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, out)
+	})
 	mux.HandleFunc("GET /api/apps/{app}/scenarios/{id}/yaml", func(w http.ResponseWriter, r *http.Request) {
 		b, err := st.GetScenarioYAML(r.PathValue("app"), r.PathValue("id"))
 		if err != nil {
@@ -407,6 +455,7 @@ func (s *Server) Handler() http.Handler {
 			Scenarios   []string          `json:"scenarios"`
 			Tags        []string          `json:"tags"`
 			Kind        string            `json:"kind"`
+			Until       string            `json:"until"`
 			Vars        map[string]string `json:"vars"`
 		}
 		if r.ContentLength != 0 {
@@ -419,17 +468,20 @@ func (s *Server) Handler() http.Handler {
 			badRequest(w, "kind must be positive, negative or empty")
 			return
 		}
-		res, err := s.Engine.Run(r.Context(), engine.Options{App: r.PathValue("app"), Env: req.Environment, Scenarios: req.Scenarios, Tags: req.Tags, Kind: req.Kind, Vars: req.Vars,
+		res, err := s.Engine.Run(r.Context(), engine.Options{App: r.PathValue("app"), Env: req.Environment, Scenarios: req.Scenarios, Tags: req.Tags, Kind: req.Kind, Until: req.Until, Vars: req.Vars,
 			By: clip(r.Header.Get("X-Testplane-User"), 80), Source: "server"})
 		if err != nil {
 			fail(w, err)
 			return
 		}
-		if err := st.SaveRun(res); err != nil {
-			fail(w, err)
-			return
+		// A partial run made while authoring ("run to this step") is not history.
+		if req.Until == "" {
+			if err := st.SaveRun(res); err != nil {
+				fail(w, err)
+				return
+			}
+			s.Prune()
 		}
-		s.Prune()
 		writeJSON(w, 200, res)
 	})
 	// History. Filters: scenario, status, env, from, to (RFC 3339 or

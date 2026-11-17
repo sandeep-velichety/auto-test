@@ -100,3 +100,6 @@ export interface AuthCheckResult { ok: boolean; error?: string; sends?: string[]
 export interface Backend { id: string; name: string; url: string; token?: string; user?: string }
 
 export interface RunQuery { scenario?: string; status?: string; env?: string; from?: string; to?: string; limit?: number }
+
+export interface GrpcMethod { name: string; fullName: string; inputType: string; outputType: string; clientStreaming?: boolean; serverStreaming?: boolean; template: any }
+export interface GrpcService { name: string; methods: GrpcMethod[] }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { api, slug, uniqueId } from './api'
+import { api, download, parseCurl, slug, uniqueId } from './api'
 import type { Application, AuthProfile, CertSet, RunResult, Scenario, Test, TestType } from './types'
-import { Field, KV, Notice, Section, Text, useAction } from './widgets'
+import { Field, KV, Notice, Section, StatusBadge, Text, useAction } from './widgets'
 import { AuthSelect, blankStep, KindBadge, MtlsSelect, TestEditor, TYPE_LABEL, TypeBadge } from './TestEditor'
 import { RunView } from './RunView'
 import { History } from './History'
@@ -37,6 +37,7 @@ export function ScenarioEditor({ app, scenarioId, profiles, sets, protos, env, o
   const [version, setVersion] = useState(0) // bumps to remount editors after a reload
   const [run, setRun] = useState<RunResult | null>(null)
   const [saved, setSaved] = useState(false)
+  const [curl, setCurl] = useState<string | null>(null)
   const load = useAction()
   const act = useAction()
 
@@ -95,10 +96,21 @@ export function ScenarioEditor({ app, scenarioId, profiles, sets, protos, env, o
     })
     return ok
   }
-  const runNow = async () => {
+  const runNow = async (untilIndex?: number) => {
     if (dirty && !(await save())) return
-    await act.run(async () => { setRun(null); setRun(await api.run(app.id, { environment: env, scenarios: [sc.id] })) })
+    // After a save, placeholder ids have become real ones: read the id again.
+    const fresh = untilIndex === undefined ? undefined : (await api.scenarios(app.id)).find(s => s.id === sc.id)?.tests[untilIndex]?.id
+    await act.run(async () => { setRun(null); setRun(await api.run(app.id, { environment: env, scenarios: [sc.id], until: fresh })) })
   }
+  const addFromCurl = () => {
+    const parsed = parseCurl(curl || '')
+    if (!parsed) { act.setError('That does not look like a curl command. It should start with “curl” and contain a URL.'); return }
+    const id = uniqueId('step', sc.tests.map(t => t.id))
+    let name = parsed.method + ' ' + parsed.url
+    try { name = parsed.method + ' ' + new URL(parsed.url).pathname } catch { /* keep the raw url */ }
+    change({ tests: [...sc.tests, { id, name, type: 'http', http: parsed }] }); setOpen(id); setCurl(null); act.setError('')
+  }
+  const lastStatus = (id: string) => run?.scenarios[0]?.tests?.find(t => t.id === id)?.status
   const remove = () => {
     if (!confirm(`Delete scenario “${sc.name}”? This removes ${sc.id}.yaml.`)) return
     act.run(async () => { await api.deleteScenario(app.id, sc.id); onDeleted() })
@@ -118,9 +130,11 @@ export function ScenarioEditor({ app, scenarioId, profiles, sets, protos, env, o
             <button type="button" className={mode === 'form' ? 'on' : ''} onClick={() => { if (mode !== 'form' && (!dirty || confirm('Discard unsaved YAML edits?'))) { setMode('form'); if (dirty) reload() } }}>Form</button>
             <button type="button" className={mode === 'yaml' ? 'on' : ''} onClick={() => { if (mode !== 'yaml' && (!dirty || confirm('Switch to YAML? Unsaved form changes are discarded.'))) { setMode('yaml'); if (dirty) reload() } }}>YAML</button>
           </div>
+          <button type="button" title="The scenario with the auth profiles and certificate sets it uses, in one YAML file" disabled={act.busy || dirty}
+            onClick={() => act.run(async () => download(await api.exportScenario(app.id, sc.id), sc.id + '.scenario.yaml'))}>Download YAML</button>
           <button type="button" className="link danger" onClick={remove}>Delete</button>
           <button type="button" onClick={save} disabled={act.busy || !dirty}>{saved && !dirty ? 'Saved' : 'Save'}</button>
-          <button type="button" className="primary" onClick={runNow} disabled={act.busy || sc.tests.length === 0}>{act.busy ? 'Working…' : dirty ? 'Save and run' : 'Run scenario'}</button>
+          <button type="button" className="primary" onClick={() => runNow()} disabled={act.busy || sc.tests.length === 0}>{act.busy ? 'Working…' : dirty ? 'Save and run' : 'Run scenario'}</button>
         </div>
       </div>
       {act.error && <Notice kind="error" onClose={() => act.setError('')}>{act.error}</Notice>}
@@ -160,21 +174,33 @@ export function ScenarioEditor({ app, scenarioId, profiles, sets, protos, env, o
                   <span className="result-name">{t.name || <em className="muted">unnamed step</em>}</span>
                   {t.variants?.length ? <span className="muted">+{t.variants.length} case{t.variants.length === 1 ? '' : 's'}</span> : null}
                   {t.skip && <span className="muted">skipped</span>}
+                  {lastStatus(t.id) && <StatusBadge status={lastStatus(t.id)!} />}
                 </button>
                 <div className="row tight">
+                  <button type="button" className="icon" title="Run the scenario up to and including this step" disabled={act.busy} onClick={() => runNow(i)}>▶</button>
                   <button type="button" className="icon" title="Move up" disabled={i === 0} onClick={() => move(i, -1)}>↑</button>
                   <button type="button" className="icon" title="Move down" disabled={i === sc.tests.length - 1} onClick={() => move(i, 1)}>↓</button>
                   <button type="button" className="icon" title="Duplicate" onClick={() => duplicate(i)}>⧉</button>
                   <button type="button" className="icon" title="Delete step" onClick={() => { if (confirm(`Delete step “${t.name || t.id}”?`)) change({ tests: sc.tests.filter((_, j) => j !== i) }) }}>×</button>
                 </div>
               </div>
-              {open === t.id && <TestEditor test={t} onChange={nt => setTest(i, nt)} profiles={profiles} inheritedAuth={inherited} protos={protos} sets={sets} inheritedMtls={sc.mtls || ''} />}
+              {open === t.id && <TestEditor test={t} onChange={nt => setTest(i, nt)} profiles={profiles} inheritedAuth={inherited} protos={protos} sets={sets} inheritedMtls={sc.mtls || ''}
+                describeGrpc={(step, auth, mtls) => api.describeGrpc(app.id, { environment: env, auth, mtls, target: step.target || '', plaintext: !!step.plaintext, protoFiles: step.protoFiles })} />}
             </div>
           ))}
           <div className="add-row">
             <span className="muted">Add step:</span>
             {(Object.keys(TYPE_LABEL) as TestType[]).map(type => <button type="button" key={type} onClick={() => addTest(type)}>+ {TYPE_LABEL[type]}</button>)}
+            <button type="button" onClick={() => setCurl(curl === null ? '' : null)}>Paste cURL</button>
           </div>
+          {curl !== null && (
+            <div className="card">
+              <Field label="curl command" hint="Method, URL, headers and body become a new HTTP step. Replace hosts and secrets with {{variables}} afterwards.">
+                <textarea className="mono" rows={4} value={curl} spellCheck={false} placeholder={"curl -X POST https://api.example.com/orders -H 'Content-Type: application/json' -d '{\"item\":\"x\"}'"} onChange={e => setCurl(e.target.value)} />
+              </Field>
+              <div className="row"><button type="button" className="primary" onClick={addFromCurl} disabled={!curl.trim()}>Add as HTTP step</button><button type="button" className="link" onClick={() => setCurl(null)}>Cancel</button></div>
+            </div>
+          )}
         </div>
       )}
 

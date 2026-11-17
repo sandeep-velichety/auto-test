@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/testplane/testplane/internal/auth"
+	"github.com/testplane/testplane/internal/executor"
 	"github.com/testplane/testplane/internal/model"
 	"github.com/testplane/testplane/internal/store"
 )
@@ -65,5 +66,61 @@ func (e *Engine) CheckAuth(ctx context.Context, appID, profileID, envName, mtlsI
 	}
 	sort.Strings(out.Sends)
 	out.ClientCert = creds.TLS != nil && len(creds.TLS.Certificates) > 0
+	return out, nil
+}
+
+// adhoc prepares what a single call outside a run needs: the environment's
+// variables and a credential resolver.
+func (e *Engine) adhoc(appID, envName string) (*scenarioRun, error) {
+	app, err := e.Store.GetApp(appID)
+	if err != nil {
+		return nil, err
+	}
+	if envName == "" {
+		envName = app.DefaultEnvironment
+	}
+	vars := map[string]string{}
+	if envName != "" {
+		env, ok := app.Environments[envName]
+		if !ok {
+			return nil, fmt.Errorf("%w: application %q has no environment %q", store.ErrInvalid, appID, envName)
+		}
+		for k, v := range env {
+			vars[k] = v
+		}
+	}
+	return &scenarioRun{e: e, app: app, sc: &model.Scenario{}, vars: vars,
+		shared: &runShared{store: e.Store, appEnv: map[string]map[string]string{}, env: envName, resolver: auth.NewResolver("")}}, nil
+}
+
+// DescribeGRPC lists the services and methods of a gRPC target, using the
+// same variables, auth and certificates a test in that environment would.
+func (e *Engine) DescribeGRPC(ctx context.Context, appID, envName, authID, mtlsID string, step model.GRPCStep) ([]executor.GRPCService, error) {
+	run, err := e.adhoc(appID, envName)
+	if err != nil {
+		return nil, err
+	}
+	rd := newRenderer(run.vars)
+	step.Target = rd.str(step.Target)
+	if err := rd.err(); err != nil {
+		return nil, fmt.Errorf("%w: %v", store.ErrInvalid, err)
+	}
+	if step.Target == "" {
+		return nil, fmt.Errorf("%w: enter the target (host:port) first", store.ErrInvalid)
+	}
+	if authID == "" {
+		authID = run.app.DefaultAuth
+	}
+	if mtlsID == "" {
+		mtlsID = run.matchSet(step.Target)
+	}
+	creds, err := run.credentials(ctx, firstSet(authID, model.AuthNone), mtlsID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", store.ErrInvalid, err)
+	}
+	out, err := executor.GRPCDescribe(ctx, &step, creds, e.Store.AssetDir(appID, "protos"))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", store.ErrInvalid, err)
+	}
 	return out, nil
 }
