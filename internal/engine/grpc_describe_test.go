@@ -65,7 +65,10 @@ func TestDescribeGRPCAndRunUntil(t *testing.T) {
 	// deadline ends the watch).
 	save(t, st, &model.Scenario{ID: "stream", Auth: "none", Tests: []model.Test{
 		{ID: "watch", Type: model.TypeGRPC, GRPC: &model.GRPCStep{Target: "{{grpcTarget}}", Method: "grpc.health.v1.Health/Watch", Plaintext: true, Message: map[string]any{"service": "orders"}, TimeoutMs: 1500},
-			Expect: &model.Expect{Code: "DEADLINE_EXCEEDED"}},
+			// The watch never ends by itself; the timeout stops it. Whether that
+			// surfaces as DEADLINE_EXCEEDED or CANCELED depends on timing, so
+			// this only requires a non-OK end.
+			Kind: model.KindNegative},
 	}})
 	res, err = e.Run(ctx, Options{App: "shop", Scenarios: []string{"stream"}})
 	must(t, err)

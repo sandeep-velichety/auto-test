@@ -16,6 +16,19 @@ environments:
     postgresDsn: postgres://qa:{{$env.PG_PASSWORD}}@pg.staging:5432/orders?sslmode=require
 ```
 
+With regions, each environment key is an `environment/region` pair holding that pair's full set of values:
+
+```yaml
+defaultEnvironment: stage/NA
+environments:
+  stage/NA: {baseUrl: "https://orders.na.stage.example.com"}
+  stage/AU: {baseUrl: "https://orders.au.stage.example.com"}
+  prod/NA:  {baseUrl: "https://orders.na.example.com"}
+  prod/AU:  {baseUrl: "https://orders.au.example.com"}
+```
+
+Run a pair with `--env stage --region AU` (or `--env stage/AU`). In tests, `{{$environment}}` and `{{$region}}` give the two names. In the `environments:` block of an auth profile or certificate set, a key may be an environment (`stage`), a region (`AU`) or a pair (`stage/AU`); all that match are applied in that order, so the most specific wins.
+
 ## Variables
 
 `{{name}}` is replaced in every string of a test, an expectation and an auth profile. Lowest to highest precedence: environment, scenario `variables`, `--var` overrides, values captured by earlier steps. An undefined variable fails the test with a clear message.

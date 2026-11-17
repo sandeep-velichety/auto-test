@@ -139,6 +139,7 @@ func run(args []string) int {
 	ws := workspaceFlag(fs)
 	app := fs.String("app", "", "application id (required)")
 	env := fs.String("env", "", "environment name (default: the application's default)")
+	region := fs.String("region", "", "region, for applications whose environments are environment/region pairs (same as --env ENV/REGION)")
 	kind := fs.String("kind", "", "positive = skip negative cases, negative = skip positive variants")
 	junit := fs.String("junit", "", "write a JUnit XML report to this file")
 	jsonOut := fs.String("json", "", "write the full JSON result to this file")
@@ -169,6 +170,20 @@ func run(args []string) int {
 		overrides[k] = val
 	}
 	st := store.New(*ws)
+	if *region != "" {
+		name := *env
+		if name == "" {
+			// No --env: keep the environment of the application's default pair.
+			if a, err := st.GetApp(*app); err == nil {
+				name, _, _ = strings.Cut(a.DefaultEnvironment, "/")
+			}
+		}
+		if name == "" || strings.Contains(name, "/") {
+			fmt.Fprintln(os.Stderr, "error: --region needs --env with a plain environment name, e.g. --env stage --region NA")
+			return 2
+		}
+		*env = name + "/" + *region
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	last := ""

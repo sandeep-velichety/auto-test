@@ -149,10 +149,28 @@ func splitHostPort(s string) (host, port string) {
 	return s, ""
 }
 
+// EnvLayers splits an environment key into the keys whose overrides apply
+// to it, least specific first. With regions, an environment is a pair such
+// as "stage/NA": overrides for "stage", then "NA", then "stage/NA" apply.
+func EnvLayers(env string) []string {
+	name, region, ok := strings.Cut(env, "/")
+	if !ok || name == "" || region == "" {
+		if env == "" {
+			return nil
+		}
+		return []string{env}
+	}
+	return []string{name, region, env}
+}
+
 // For returns the files to use in an environment.
 func (c *CertSet) For(env string) *TLSSettings {
 	t := TLSSettings{Cert: c.Cert, Key: c.Key, CA: c.CA, ServerName: c.ServerName, InsecureSkipVerify: c.InsecureSkipVerify}
-	if o, ok := c.Environments[env]; ok {
+	for _, layer := range EnvLayers(env) {
+		o, ok := c.Environments[layer]
+		if !ok {
+			continue
+		}
 		if o.Cert != "" {
 			t.Cert = o.Cert
 		}
@@ -600,7 +618,11 @@ func mergeMaps(base, override map[string]any) map[string]any {
 func (a *AuthProfile) ForEnv(env string) (*AuthProfile, error) {
 	m := profileMap(a)
 	delete(m, "environments")
-	if o, ok := a.Environments[env]; ok {
+	for _, layer := range EnvLayers(env) {
+		o, ok := a.Environments[layer]
+		if !ok {
+			continue
+		}
 		ob, _ := json.Marshal(o)
 		var om map[string]any
 		_ = json.Unmarshal(ob, &om)

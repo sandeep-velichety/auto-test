@@ -63,6 +63,13 @@ func (e *Engine) Run(ctx context.Context, o Options) (*model.RunResult, error) {
 			base[k] = v
 		}
 	}
+	// {{$environment}} and {{$region}} name what is being run, so a URL can
+	// be written once, e.g. https://api.{{$region}}.{{$environment}}.example.com
+	if name, region, ok := strings.Cut(envName, "/"); ok {
+		base["$environment"], base["$region"] = name, region
+	} else {
+		base["$environment"], base["$region"] = envName, ""
+	}
 	// Other applications' environment values are visible as {{app-id.name}},
 	// so a flow scenario can call several services. Each one contributes the
 	// environment with the same name, or else its own default.

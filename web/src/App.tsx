@@ -107,7 +107,10 @@ export default function App() {
   const createApp = () => top.run(async () => {
     const id = uniqueId(slug(newApp), (apps || []).map(a => a.id))
     if (!slug(newApp)) throw new Error('Give the application a name.')
-    await api.saveApp({ id, name: newApp.trim(), defaultEnvironment: 'local', environments: { local: { baseUrl: 'http://localhost:8080' } } })
+    // New applications start with the standard environments and regions.
+    const environments: Record<string, Record<string, string>> = {}
+    for (const e of ['stage', 'qa', 'prod']) for (const r of ['NA', 'AU']) environments[`${e}/${r}`] = { baseUrl: '' }
+    await api.saveApp({ id, name: newApp.trim(), defaultEnvironment: 'stage/NA', environments })
     setNewApp(''); await loadApps(); go({ app: id, tab: 'settings' })
   })
   const createScenario = () => top.run(async () => {
@@ -137,6 +140,16 @@ export default function App() {
   const importZip = (f: File) => top.run(async () => { const r = await api.importApp(await f.arrayBuffer()); await loadApps(); go({ app: r.id, tab: 'scenarios' }) })
 
   const envNames = Object.keys(app?.environments || {})
+  // With regions, an environment key is "environment/region": offer two pickers.
+  const paired = envNames.length > 0 && envNames.every(n => n.includes('/'))
+  const [envPart, regionPart] = paired ? [env.split('/')[0], env.split('/').slice(1).join('/')] : [env, '']
+  const envParts = [...new Set(envNames.map(n => n.split('/')[0]))]
+  const regionsFor = (e: string) => envNames.filter(n => n.split('/')[0] === e).map(n => n.split('/').slice(1).join('/'))
+  const pickEnv = (e: string) => setEnv(envNames.includes(`${e}/${regionPart}`) ? `${e}/${regionPart}` : `${e}/${regionsFor(e)[0]}`)
+  const deleteApp = () => {
+    if (!app || !confirm(`Delete application “${app.name}” with all its scenarios, auth profiles, certificates and run history? This cannot be undone.`)) return
+    top.run(async () => { await api.deleteApp(app.id); const list = await loadApps(); go(list[0] ? { app: list[0].id, tab: 'scenarios' } : { tab: 'scenarios' }) })
+  }
   const selected = scenarios.find(s => s.id === route.item)
 
   return (
@@ -178,9 +191,17 @@ export default function App() {
               <div>
                 <h1>{app.name}</h1>
                 {app.description && <p className="muted">{app.description}</p>}
+                <button type="button" className="link danger" onClick={deleteApp}>Delete application</button>
               </div>
               <div className="row">
-                <label className="inline">Environment <Select value={env} onChange={setEnv} options={envNames.length ? envNames : [['', '(none defined)']]} /></label>
+                {paired ? (
+                  <>
+                    <label className="inline">Environment <Select value={envPart} onChange={pickEnv} options={envParts} /></label>
+                    <label className="inline">Region <Select value={regionPart} onChange={r => setEnv(`${envPart}/${r}`)} options={regionsFor(envPart)} /></label>
+                  </>
+                ) : (
+                  <label className="inline">Environment <Select value={env} onChange={setEnv} options={envNames.length ? envNames : [['', '(none defined)']]} /></label>
+                )}
                 <label className="inline">Run <Select value={kind} onChange={setKind} options={[['', 'everything'], ['positive', 'positive only'], ['negative', 'steps + negative cases']]} /></label>
                 <button type="button" className="primary" onClick={runAll} disabled={runAct.busy || scenarios.length === 0}>{runAct.busy ? 'Running…' : `Run all ${scenarios.length} scenario${scenarios.length === 1 ? '' : 's'}`}</button>
               </div>

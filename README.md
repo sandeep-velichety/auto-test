@@ -55,6 +55,7 @@ Headless, as a pipeline would run it:
 | --- | --- |
 | `--app ID` | application to run (required) |
 | `--env NAME` | environment; default is the application's default |
+| `--region NAME` | region, for applications that use environment and region pairs; same as `--env ENV/REGION` |
 | `--scenario a,b` | only these scenarios |
 | `--tag smoke` | only scenarios carrying one of these tags |
 | `--kind positive` | skip negative tests and cases (`negative` skips positive cases instead) |
@@ -150,6 +151,10 @@ Assets sit next to the application that uses them. To share an application, copy
 **Application.** One system under test. Its environments are sets of variables such as `baseUrl` or `postgresDsn`; tests refer to them as `{{baseUrl}}`, so the same scenarios run against any environment.
 
 **Everything is per application and per environment.** Each application owns its certificate files, certificate sets, auth profiles and environments. Certificate sets and auth profiles can hold different values for each environment (staging's client id, production's certificate), so one scenario runs anywhere.
+
+**Environments and regions.** New applications start with the environments `stage`, `qa` and `prod` in the regions `NA` and `AU`. Every environment and region pair (stage in NA, stage in AU, …) has its own complete set of values, and a run picks one pair: two pickers in the UI, or `--env stage --region AU` on the command line. Under "Environments & settings" you can add an environment (created in every region) or a region (created for every environment); a new one starts as a copy of an existing one for you to edit. Auth profiles and certificate sets can differ by environment, by region or by one specific pair. Applications without regions keep working with plain environment names.
+
+**Deleting an application.** "Delete application" is under the application's name at the top of the page (and at the bottom of "Environments & settings"). It asks for confirmation and removes the application's scenarios, auth profiles, certificates and run history.
 
 **Certificate set.** A named group of files for mutual TLS: client certificate, private key and, for a private CA, the CA bundle. You configure it once per application. A test then says whether mutual TLS is needed (`mtls: <set>`, or `mtls: none`). As in Postman, a set can also list hosts, and is then presented automatically on calls to those hosts. The editor shows which files are needed and whether each is uploaded, matching and unexpired; `testplane validate` reports the same for every environment.
 
