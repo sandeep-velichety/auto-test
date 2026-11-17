@@ -474,6 +474,9 @@ func (s *Store) DeleteAsset(app, category, name string) error {
 // ---- runs ----
 
 func (s *Store) SaveRun(r *model.RunResult) error {
+	if !model.ValidID(r.Application) || !model.ValidFileName(r.ID) {
+		return invalid("run %q of application %q", r.ID, r.Application)
+	}
 	b, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return err
@@ -496,8 +499,19 @@ func (s *Store) GetRun(app, id string) (*model.RunResult, error) {
 	return &r, json.Unmarshal(b, &r)
 }
 
-// ListRuns returns the most recent runs, newest first, without test detail.
-func (s *Store) ListRuns(app string, limit int) ([]model.RunResult, error) {
+// RunFilter narrows a run listing. Zero values match everything.
+type RunFilter struct {
+	Scenario    string
+	Status      string
+	Environment string
+	From, To    time.Time
+	Limit       int
+}
+
+// ListRuns returns runs newest first, without test detail. With a scenario
+// filter each entry keeps only that scenario, so its status and duration
+// describe the scenario rather than the whole run.
+func (s *Store) ListRuns(app string, f RunFilter) ([]model.RunResult, error) {
 	if !model.ValidID(app) {
 		return nil, invalid("application id %q", app)
 	}
@@ -515,13 +529,49 @@ func (s *Store) ListRuns(app string, limit int) ([]model.RunResult, error) {
 		}
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(names)))
-	if limit > 0 && len(names) > limit {
-		names = names[:limit]
-	}
 	out := []model.RunResult{}
 	for _, n := range names {
+		if f.Limit > 0 && len(out) >= f.Limit {
+			break
+		}
 		r, err := s.GetRun(app, n)
 		if err != nil {
+			continue
+		}
+		if !f.From.IsZero() && r.StartedAt.Before(f.From) {
+			continue
+		}
+		if !f.To.IsZero() && r.StartedAt.After(f.To) {
+			continue
+		}
+		if f.Environment != "" && r.Environment != f.Environment {
+			continue
+		}
+		if f.Scenario != "" {
+			var only []model.ScenarioResult
+			for _, sc := range r.Scenarios {
+				if sc.ID == f.Scenario {
+					only = append(only, sc)
+				}
+			}
+			if len(only) == 0 {
+				continue
+			}
+			r.Scenarios = only
+			r.Status, r.DurationMs, r.Summary = only[0].Status, only[0].DurationMs, model.Summary{}
+			for _, t := range only[0].Tests {
+				r.Summary.Total++
+				switch t.Status {
+				case model.StatusPassed:
+					r.Summary.Passed++
+				case model.StatusSkipped:
+					r.Summary.Skipped++
+				default:
+					r.Summary.Failed++
+				}
+			}
+		}
+		if f.Status != "" && r.Status != f.Status {
 			continue
 		}
 		for i := range r.Scenarios {
@@ -532,10 +582,48 @@ func (s *Store) ListRuns(app string, limit int) ([]model.RunResult, error) {
 	return out, nil
 }
 
+// PruneRuns deletes stored runs that started before the cutoff and returns
+// how many were removed.
+func (s *Store) PruneRuns(before time.Time) (int, error) {
+	root := filepath.Join(s.Root, ".runs")
+	apps, err := os.ReadDir(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, a := range apps {
+		if !a.IsDir() || !model.ValidID(a.Name()) {
+			continue
+		}
+		files, err := os.ReadDir(filepath.Join(root, a.Name()))
+		if err != nil {
+			continue
+		}
+		for _, f := range files {
+			id := strings.TrimSuffix(f.Name(), ".json")
+			if id == f.Name() {
+				continue
+			}
+			r, err := s.GetRun(a.Name(), id)
+			if err != nil || !r.StartedAt.Before(before) {
+				continue
+			}
+			if os.Remove(filepath.Join(root, a.Name(), f.Name())) == nil {
+				removed++
+			}
+		}
+	}
+	return removed, nil
+}
+
 // ---- export / import ----
 
-// ExportApp writes the application folder as a zip. Private keys are left
-// out unless includeKeys is set.
+// ExportApp writes the application folder as a zip. Unless includeKeys is
+// set, private keys are left out and literal secrets in auth profiles are
+// replaced with a placeholder.
 func (s *Store) ExportApp(app string, w io.Writer, includeKeys bool) error {
 	if _, err := s.GetApp(app); err != nil {
 		return err
@@ -561,6 +649,15 @@ func (s *Store) ExportApp(app string, w io.Writer, includeKeys bool) error {
 		b, err := os.ReadFile(p)
 		if err != nil {
 			return err
+		}
+		if !includeKeys && strings.HasPrefix(rel, "assets/auth/") && strings.HasSuffix(rel, ".yaml") {
+			var prof model.AuthProfile
+			if yaml.UnmarshalWithOptions(b, &prof, yaml.Strict()) == nil {
+				masked := prof.Masked()
+				if redacted, err := yaml.MarshalWithOptions(masked, yaml.Indent(2), yaml.IndentSequence(true)); err == nil {
+					b = bytes.ReplaceAll(redacted, []byte(model.SecretMask), []byte("CHANGE_ME"))
+				}
+			}
 		}
 		f, err := zw.Create(app + "/" + rel)
 		if err != nil {

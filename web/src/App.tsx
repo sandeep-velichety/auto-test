@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, slug, uniqueId } from './api'
+import { api, connections, slug, uniqueId } from './api'
+import { Backends } from './Backends'
+import { History } from './History'
 import type { Application, Asset, AuthProfile, RunResult, Scenario } from './types'
 import { AuthPanel } from './AuthPanel'
 import { EnvPanel } from './EnvPanel'
 import { RunView } from './RunView'
 import { ScenarioEditor } from './ScenarioEditor'
-import { FileButton, Notice, Select, StatusBadge, useAction } from './widgets'
+import { FileButton, Notice, Select, useAction } from './widgets'
 
 type Tab = 'scenarios' | 'auth' | 'settings' | 'runs'
 interface Route { app?: string; tab: Tab; item?: string }
@@ -21,25 +23,11 @@ function go(r: Route) {
 }
 
 function RunsPanel({ app, latest }: { app: Application; latest: RunResult | null }) {
-  const [runs, setRuns] = useState<RunResult[]>([])
-  const [detail, setDetail] = useState<RunResult | null>(latest)
-  const act = useAction()
-  useEffect(() => { act.run(async () => setRuns(await api.runs(app.id))) }, [app.id, latest?.id]) // eslint-disable-line
-  useEffect(() => { setDetail(latest) }, [latest])
   return (
-    <div className="split">
-      <div className="list">
-        <div className="list-head"><h3>Run history</h3></div>
-        {act.error && <Notice kind="error">{act.error}</Notice>}
-        {runs.length === 0 && !act.busy && <p className="muted">No runs yet. Runs started here, or from the CLI with <code>--save</code>, are listed.</p>}
-        {runs.map(r => (
-          <button type="button" key={r.id} className={'list-item' + (detail?.id === r.id ? ' on' : '')} onClick={() => act.run(async () => setDetail(await api.getRun(app.id, r.id)))}>
-            <span><StatusBadge status={r.status} /> {new Date(r.startedAt).toLocaleString()}</span>
-            <span className="muted">{r.summary.passed}/{r.summary.total} passed · {r.scenarios.length} scenario{r.scenarios.length === 1 ? '' : 's'}{r.environment ? ` · ${r.environment}` : ''}</span>
-          </button>
-        ))}
-      </div>
-      <div className="detail">{detail ? <div className="card"><RunView run={detail} /></div> : <p className="muted">Select a run to see its results.</p>}</div>
+    <div className="editor">
+      {latest && <div className="card"><h3>Run just finished</h3><RunView run={latest} /></div>}
+      <h3>Run history on this backend</h3>
+      <History app={app.id} envs={Object.keys(app.environments || {})} refresh={latest?.id} />
     </div>
   )
 }
@@ -55,6 +43,9 @@ export default function App() {
   const [lastRun, setLastRun] = useState<RunResult | null>(null)
   const [newApp, setNewApp] = useState('')
   const [newScenario, setNewScenario] = useState('')
+  const [others, setOthers] = useState<AuthProfile[]>([])
+  const [showBackends, setShowBackends] = useState(false)
+  const [backend, setBackend] = useState(connections.current())
   const top = useAction()
   const runAct = useAction()
 
@@ -69,14 +60,27 @@ export default function App() {
     setApps(list)
     return list
   }, [])
-  useEffect(() => { top.run(async () => { const list = await loadApps(); if (!parseHash().app && list[0]) go({ app: list[0].id, tab: 'scenarios' }) }) }, []) // eslint-disable-line
+  useEffect(() => {
+    // Everything on screen belongs to the previous backend: clear it first.
+    setApps(null); setScenarios([]); setProfiles([]); setAssets([]); setOthers([]); setLastRun(null)
+    top.run(async () => {
+      const list = await loadApps()
+      const r = parseHash()
+      if (!list.some(a => a.id === r.app)) go(list[0] ? { app: list[0].id, tab: 'scenarios' } : { tab: 'scenarios' })
+      else if (r.item) go({ app: r.app, tab: r.tab })
+    })
+  }, [backend.id, backend.url, backend.token]) // eslint-disable-line
 
   const app = apps?.find(a => a.id === route.app)
   const loadAppData = useCallback(async () => {
     if (!route.app) return
     const [s, p, a] = await Promise.all([api.scenarios(route.app), api.auth(route.app), api.assets(route.app)])
     setScenarios(s); setProfiles(p); setAssets(a)
-  }, [route.app])
+    // Profiles of the other applications, usable in flow scenarios as "app/profile".
+    const rest = (apps || []).filter(o => o.id !== route.app)
+    const lists = await Promise.all(rest.map(o => api.auth(o.id).catch(() => [] as AuthProfile[])))
+    setOthers(lists.flatMap((list, i) => list.filter(x => !x.description?.startsWith('INVALID: ')).map(x => ({ ...x, id: rest[i].id + '/' + x.id, name: `${rest[i].name || rest[i].id} / ${x.name || x.id}` }))))
+  }, [route.app, apps])
   useEffect(() => {
     setScenarios([]); setProfiles([]); setAssets([]); setLastRun(null)
     if (app) top.run(loadAppData)
@@ -110,6 +114,11 @@ export default function App() {
     <div className="shell">
       <aside className="sidebar">
         <div className="brand">Testplane</div>
+        <div className="side-label">Backend</div>
+        <button type="button" className="side-item backend" onClick={() => setShowBackends(true)} title="Switch or add a backend">
+          <span>{backend.name}</span>
+          <span className="side-sub">{backend.url || 'this server'} · change</span>
+        </button>
         <div className="side-label">Applications</div>
         <nav>
           {(apps || []).map(a => (
@@ -124,6 +133,7 @@ export default function App() {
         </div>
       </aside>
 
+      {showBackends && <Backends onClose={() => setShowBackends(false)} onChanged={() => setBackend({ ...connections.current() })} />}
       <main className="main">
         {top.error && <Notice kind="error" onClose={() => top.setError('')}>{top.error}</Notice>}
         {!apps && !top.error && <p className="muted">Loading…</p>}
@@ -171,14 +181,14 @@ export default function App() {
                 </div>
                 <div className="detail">
                   {route.item && selected
-                    ? <ScenarioEditor app={app} scenarioId={route.item} profiles={profiles} protos={assets.filter(a => a.category === 'protos').map(a => a.name)} env={env}
+                    ? <ScenarioEditor key={backend.id + route.item} app={app} scenarioId={route.item} profiles={[...profiles, ...others]} protos={assets.filter(a => a.category === 'protos').map(a => a.name)} env={env}
                         onSaved={() => loadAppData()} onDeleted={async () => { await loadAppData(); go({ app: app.id, tab: 'scenarios' }) }} />
                     : <p className="muted">{route.item && scenarios.length ? `Scenario “${route.item}” does not exist.` : 'Select a scenario, or create one.'}</p>}
                 </div>
               </div>
             )}
-            {route.tab === 'auth' && <AuthPanel key={app.id} app={app} profiles={profiles} assets={assets} env={env} reload={loadAppData} />}
-            {route.tab === 'settings' && <EnvPanel key={app.id} app={app} profiles={profiles} onSaved={() => loadApps()} onDeleted={async () => { await loadApps(); go({ tab: 'scenarios' }) }} />}
+            {route.tab === 'auth' && <AuthPanel key={backend.id + app.id} app={app} profiles={profiles} assets={assets} env={env} reload={loadAppData} />}
+            {route.tab === 'settings' && <EnvPanel key={backend.id + app.id} app={app} profiles={profiles} onSaved={() => loadApps()} onDeleted={async () => { await loadApps(); go({ tab: 'scenarios' }) }} />}
             {route.tab === 'runs' && <RunsPanel app={app} latest={lastRun} />}
           </>
         )}

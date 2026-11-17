@@ -1,6 +1,6 @@
 # Testplane
 
-A scenario-based test tool any team can plug its applications into. Testers describe an application once (environments, auth profiles, certificates), then build scenarios out of ordered tests. A test is an HTTP call, a gRPC call, a Kafka produce or consume, a Mongo check or a Postgres check. Everything is stored as YAML in one folder per application, so it can be reviewed, versioned and handed to another team.
+A scenario-based test tool any team can plug its applications into. Testers describe an application once (environments, auth profiles, certificates), then build scenarios out of ordered tests. A test is an HTTP call, a gRPC call, a Kafka produce or consume, a Mongo check, a Postgres check or a search of the service's logs in Datadog. Everything is stored as YAML in one folder per application, so it can be reviewed, versioned and handed to another team.
 
 Two pieces:
 
@@ -36,8 +36,52 @@ Headless, as a pipeline would run it:
 | `--var name=value` | override a variable, repeatable |
 | `--junit FILE`, `--json FILE` | write reports |
 | `--save` | store the run in the workspace so the UI lists it |
+| `--publish URL` | send the result to a backend's history (token from `TESTPLANE_TOKEN`) |
+| `--by NAME` | who or what started the run; recorded with it |
 
 The workspace can also be set with `TESTPLANE_WORKSPACE`. A ready-made GitHub Actions job is in `.github/workflows/ci.yml`, and a `Dockerfile` is included.
+
+## Backends
+
+A **backend** is one running `testplane serve` with its workspace. It keeps the applications, certificates, keys and secrets, runs the tests itself and stores the run history. Testers never need the certificates or secrets on their own machines: they connect the UI to a backend and work there.
+
+```bash
+TESTPLANE_TOKEN=choose-a-long-random-value \
+  ./bin/testplane serve --workspace /srv/testplane/qa --addr 0.0.0.0:8080 --retention-days 90
+```
+
+- **Connecting:** in the UI, click the backend name at the top of the sidebar, add the backend's address and access token, and switch between backends (for example QA and staging) at any time. Connections are remembered in that browser.
+- **Access token:** with `--token` (or `TESTPLANE_TOKEN`) every API call must carry the token. Without it the backend is open to anyone who can reach it.
+- **Secrets are write-only:** a secret saved in an auth profile can be used and replaced, but the API returns it as `********`. Key files are never returned, and zip exports leave out keys and replace stored secrets with `CHANGE_ME`.
+- **Run history:** every run is stored on the backend with its date, environment, who started it and full results. See it per scenario (in the scenario editor) or per application (Runs tab), filtered by result, environment and date. `--retention-days` deletes old runs.
+- **Pipelines:** `testplane run … --publish https://backend` sends a headless run's result to a backend, so it appears in the same history.
+
+## Flows across applications
+
+Keep one application per service for service-level tests, and add a "team" application for scenarios that follow a business flow through several services. Inside any scenario:
+
+- `auth: orders/orders-oauth` uses the auth profile (and certificates) of the `orders` application.
+- `{{orders.baseUrl}}` reads a value from the `orders` application's environment.
+
+A flow can then call service A, check service B's database, wait for an event and confirm what the service logged. `examples/workspace/applications/team-flows` shows the pattern.
+
+## Service logs (Datadog)
+
+A `logs` step searches Datadog for what a service logged while the scenario ran, so a test can assert that a line appeared, or that no errors did:
+
+```yaml
+- id: no-errors-logged
+  name: The orders service logged no errors
+  type: logs
+  kind: negative                 # passes when nothing matches
+  retry: {attempts: 6, delayMs: 5000}
+  logs:
+    query: "service:orders status:error @orderId:{{orderId}}"
+    apiKey: "{{$env.DD_API_KEY}}"
+    appKey: "{{$env.DD_APP_KEY}}"
+```
+
+The keys are read from the backend's environment and are masked in stored results.
 
 ## How a workspace is laid out
 
@@ -106,7 +150,8 @@ The full YAML reference, with Kafka, Mongo and Postgres examples, is in [docs/re
 
 ## Security notes
 
-- The API has no login. `serve` binds to `127.0.0.1` by default; put it behind your own access control before exposing it.
+- Start shared backends with `--token`. Without one, the API is open to anyone who can reach the port; `serve` binds to `127.0.0.1` by default for that reason. The token is one shared secret, not per-user accounts, so put the backend behind TLS and, for wider audiences, your own sign-on proxy.
+- The UI keeps a backend's token in the browser's local storage.
 - Auth profiles are plain YAML. Keep secrets out of them with `{{$env.NAME}}`, which reads an environment variable of the process running the tests, for example a CI secret.
 - Key files are written with mode `0600`, and the API never returns their contents.
 
@@ -129,4 +174,4 @@ docker compose -f examples/docker-compose.yml up -d
 
 ### What has and has not been exercised
 
-HTTP, gRPC (server reflection), OAuth2, mutual TLS and Postgres are covered by tests that talk to real servers. The Kafka and Mongo steps are implemented and compile, but they have not been run against a live broker or database yet; treat them as untested until you have tried them in your environment.
+HTTP, gRPC (server reflection), OAuth2, mutual TLS and Postgres are covered by tests that talk to real servers. The Kafka and Mongo steps are implemented and compile, but they have not been run against a live broker or database yet. The Datadog logs step is tested against a stand-in server that mimics the Logs Search API, not against a real Datadog account. Treat those three as untested until you have tried them in your environment.

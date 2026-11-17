@@ -4,10 +4,12 @@ import (
 	"archive/zip"
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/testplane/testplane/internal/demo"
 	"github.com/testplane/testplane/internal/model"
@@ -222,23 +224,124 @@ func TestExportLeavesPrivateKeysOutAndImportRestores(t *testing.T) {
 	}
 }
 
-func TestRunsAreListedNewestFirst(t *testing.T) {
+func TestRunHistoryFiltersAndRetention(t *testing.T) {
 	s := newStore(t)
-	for _, id := range []string{"20260101-000000-aa", "20260103-000000-cc", "20260102-000000-bb"} {
-		r := &model.RunResult{ID: id, Application: "shop", Scenarios: []model.ScenarioResult{{ID: "s", Tests: []model.TestResult{{ID: "t"}}}}}
+	day := func(d int) time.Time { return time.Date(2026, 1, d, 12, 0, 0, 0, time.UTC) }
+	mk := func(id string, d int, env string, scenarios ...model.ScenarioResult) {
+		r := &model.RunResult{ID: id, Application: "shop", Environment: env, StartedAt: day(d), Status: model.StatusPassed, Scenarios: scenarios}
+		for _, sc := range scenarios {
+			if sc.Status == model.StatusFailed {
+				r.Status = model.StatusFailed
+			}
+		}
 		if err := s.SaveRun(r); err != nil {
 			t.Fatal(err)
 		}
 	}
-	list, err := s.ListRuns("shop", 2)
-	if err != nil || len(list) != 2 || list[0].ID != "20260103-000000-cc" || list[1].ID != "20260102-000000-bb" {
-		t.Fatalf("list: %+v %v", list, err)
+	pass := func(id string) model.ScenarioResult {
+		return model.ScenarioResult{ID: id, Status: model.StatusPassed, DurationMs: 10, Tests: []model.TestResult{{ID: "t", Status: model.StatusPassed}}}
 	}
-	if list[0].Scenarios[0].Tests != nil {
-		t.Error("list should omit test detail")
+	failed := func(id string) model.ScenarioResult {
+		return model.ScenarioResult{ID: id, Status: model.StatusFailed, DurationMs: 20, Tests: []model.TestResult{{ID: "t", Status: model.StatusFailed}, {ID: "u", Status: model.StatusSkipped}}}
 	}
-	full, err := s.GetRun("shop", "20260101-000000-aa")
+	mk("20260101-120000-aa", 1, "staging", pass("orders"))
+	mk("20260103-120000-cc", 3, "staging", pass("orders"), failed("billing"))
+	mk("20260102-120000-bb", 2, "prod", failed("orders"))
+
+	ids := func(f RunFilter) string {
+		list, err := s.ListRuns("shop", f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, r := range list {
+			out = append(out, r.ID[6:8])
+			if len(r.Scenarios) > 0 && r.Scenarios[0].Tests != nil {
+				t.Error("list should omit test detail")
+			}
+		}
+		return strings.Join(out, " ")
+	}
+	cases := []struct {
+		name string
+		f    RunFilter
+		want string
+	}{
+		{"all, newest first", RunFilter{}, "03 02 01"},
+		{"limit", RunFilter{Limit: 2}, "03 02"},
+		{"environment", RunFilter{Environment: "staging"}, "03 01"},
+		{"run status", RunFilter{Status: model.StatusFailed}, "03 02"},
+		{"from", RunFilter{From: day(2)}, "03 02"},
+		{"to", RunFilter{To: day(2)}, "02 01"},
+		{"window", RunFilter{From: day(2), To: day(2)}, "02"},
+		{"scenario", RunFilter{Scenario: "orders"}, "03 02 01"},
+		{"scenario that ran once", RunFilter{Scenario: "billing"}, "03"},
+		{"scenario status uses the scenario, not the run", RunFilter{Scenario: "orders", Status: model.StatusPassed}, "03 01"},
+		{"unknown scenario", RunFilter{Scenario: "ghost"}, ""},
+	}
+	for _, c := range cases {
+		if got := ids(c.f); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+	list, _ := s.ListRuns("shop", RunFilter{Scenario: "billing"})
+	if r := list[0]; r.Status != model.StatusFailed || r.DurationMs != 20 || r.Summary != (model.Summary{Total: 2, Failed: 1, Skipped: 1}) || len(r.Scenarios) != 1 {
+		t.Errorf("scenario view of a run: %+v", r)
+	}
+	full, err := s.GetRun("shop", "20260101-120000-aa")
 	if err != nil || len(full.Scenarios[0].Tests) != 1 {
 		t.Fatalf("get: %+v %v", full, err)
+	}
+	if err := s.SaveRun(&model.RunResult{ID: "../../evil", Application: "shop"}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("run id with a path must be refused: %v", err)
+	}
+
+	n, err := s.PruneRuns(day(3))
+	if err != nil || n != 2 {
+		t.Fatalf("prune removed %d (%v), want 2", n, err)
+	}
+	if got := ids(RunFilter{}); got != "03" {
+		t.Errorf("after prune: %q", got)
+	}
+}
+
+func TestExportReplacesLiteralSecrets(t *testing.T) {
+	s := newStore(t)
+	_ = s.SaveAuth("shop", &model.AuthProfile{ID: "literal", Type: model.AuthOAuth2ClientCredentials, OAuth2: &model.OAuth2Auth{TokenURL: "http://x/token", ClientID: "id", ClientSecret: "hunter2"}})
+	_ = s.SaveAuth("shop", &model.AuthProfile{ID: "byenv", Type: model.AuthBearer, Bearer: &model.BearerAuth{Token: "{{$env.TOKEN}}"}})
+	var buf bytes.Buffer
+	if err := s.ExportApp("shop", &buf, false); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(buf.Bytes(), []byte("hunter2")) {
+		t.Fatal("zip is compressed; check the entries instead")
+	}
+	zr, _ := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	content := map[string]string{}
+	for _, f := range zr.File {
+		rc, _ := f.Open()
+		b, _ := io.ReadAll(rc)
+		rc.Close()
+		content[f.Name] = string(b)
+	}
+	lit := content["shop/assets/auth/literal.yaml"]
+	if strings.Contains(lit, "hunter2") || !strings.Contains(lit, "CHANGE_ME") || !strings.Contains(lit, "clientId: id") {
+		t.Errorf("literal secret must be replaced:\n%s", lit)
+	}
+	if !strings.Contains(content["shop/assets/auth/byenv.yaml"], "{{$env.TOKEN}}") {
+		t.Errorf("an env reference is not a secret and must survive:\n%s", content["shop/assets/auth/byenv.yaml"])
+	}
+	buf.Reset()
+	_ = s.ExportApp("shop", &buf, true)
+	zr, _ = zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	for _, f := range zr.File {
+		if f.Name == "shop/assets/auth/literal.yaml" {
+			rc, _ := f.Open()
+			b, _ := io.ReadAll(rc)
+			rc.Close()
+			if !strings.Contains(string(b), "hunter2") {
+				t.Error("a full export keeps secrets")
+			}
+		}
 	}
 }

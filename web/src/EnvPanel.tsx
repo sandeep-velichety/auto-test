@@ -60,8 +60,13 @@ export function EnvPanel({ app, profiles, onSaved, onDeleted }: { app: Applicati
 
       <h3>Share or remove</h3>
       <div className="row">
-        <a className="button" href={`/api/apps/${encodeURIComponent(a.id)}/export`}>Download as zip</a>
-        <span className="hint">Scenarios, auth profiles and certificates. Private keys are left out.</span>
+        <button type="button" disabled={act.busy} onClick={() => act.run(async () => {
+          const url = URL.createObjectURL(await api.exportApp(a.id))
+          const link = document.createElement('a')
+          link.href = url; link.download = a.id + '.zip'; link.click()
+          setTimeout(() => URL.revokeObjectURL(url), 1000)
+        })}>Download as zip</button>
+        <span className="hint">Scenarios, auth profiles and certificates. Private keys are left out and stored secrets are replaced with CHANGE_ME.</span>
       </div>
       <div className="row">
         <button type="button" className="danger" onClick={() => { if (confirm(`Delete application “${a.name}” with all its scenarios, auth profiles and certificates? This cannot be undone.`)) act.run(async () => { await api.deleteApp(a.id); onDeleted() }) }}>Delete application</button>

@@ -45,7 +45,7 @@ func (e *Engine) CheckAuth(ctx context.Context, appID, profileID, envName string
 	}
 	certsDir := e.Store.AssetDir(appID, "certs")
 	out := &AuthCheck{CertChecks: auth.CertChecks(p, certsDir)}
-	run := &scenarioRun{e: e, app: app, sc: &model.Scenario{}, vars: vars, resolver: auth.NewResolver(certsDir)}
+	run := &scenarioRun{e: e, app: app, sc: &model.Scenario{}, vars: vars, shared: &runShared{store: e.Store, appEnv: map[string]map[string]string{}, resolvers: map[string]*auth.Resolver{}}}
 	creds, err := run.credentials(ctx, profileID)
 	if err != nil {
 		out.Error = err.Error()

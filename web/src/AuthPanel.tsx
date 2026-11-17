@@ -79,7 +79,7 @@ function ProfileEditor({ app, initial, isNew, assets, env, takenIds, onSaved, on
         <Field label="Type" wide><Select value={p.type} onChange={type => set({ type, tls: type === 'mtls' ? (p.tls || {}) : p.tls })} options={TYPES} /></Field>
       </div>
       <Field label="Description" wide><Text value={p.description} onChange={description => set({ description: description || undefined })} /></Field>
-      <p className="hint">Values can use variables, for example <code>{'{{baseUrl}}/oauth/token'}</code>. Keep secrets out of the file with <code>{'{{$env.MY_SECRET}}'}</code>, which reads an environment variable of the runner.</p>
+      <p className="hint">Values can use variables, for example <code>{'{{baseUrl}}/oauth/token'}</code>. Keep secrets out of the file with <code>{'{{$env.MY_SECRET}}'}</code>, which reads an environment variable of the backend. A secret saved here can be used and replaced but not read back: it shows as ********.</p>
 
       {p.type === 'basic' && (
         <div className="grid">

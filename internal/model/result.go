@@ -64,6 +64,8 @@ type RunResult struct {
 	ID          string           `json:"id"`
 	Application string           `json:"application"`
 	Environment string           `json:"environment,omitempty"`
+	TriggeredBy string           `json:"triggeredBy,omitempty"`
+	Source      string           `json:"source,omitempty"` // server | cli
 	StartedAt   time.Time        `json:"startedAt"`
 	DurationMs  int64            `json:"durationMs"`
 	Status      string           `json:"status"`

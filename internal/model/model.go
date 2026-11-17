@@ -5,6 +5,7 @@ package model
 import (
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // Test step types.
@@ -14,6 +15,7 @@ const (
 	TypeKafka    = "kafka"
 	TypeMongo    = "mongo"
 	TypePostgres = "postgres"
+	TypeLogs     = "logs"
 )
 
 // Test kinds.
@@ -33,7 +35,7 @@ const (
 	AuthMTLS                    = "mtls"
 )
 
-var TestTypes = []string{TypeHTTP, TypeGRPC, TypeKafka, TypeMongo, TypePostgres}
+var TestTypes = []string{TypeHTTP, TypeGRPC, TypeKafka, TypeMongo, TypePostgres, TypeLogs}
 var AuthTypes = []string{AuthNone, AuthBasic, AuthBearer, AuthAPIKey, AuthOAuth2ClientCredentials, AuthOAuth2Password, AuthMTLS}
 
 var idRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
@@ -143,6 +145,7 @@ type Test struct {
 	Kafka    *KafkaStep    `yaml:"kafka,omitempty" json:"kafka,omitempty"`
 	Mongo    *MongoStep    `yaml:"mongo,omitempty" json:"mongo,omitempty"`
 	Postgres *PostgresStep `yaml:"postgres,omitempty" json:"postgres,omitempty"`
+	Logs     *LogsStep     `yaml:"logs,omitempty" json:"logs,omitempty"`
 
 	Expect   *Expect           `yaml:"expect,omitempty" json:"expect,omitempty"`
 	Capture  map[string]string `yaml:"capture,omitempty" json:"capture,omitempty"`
@@ -167,6 +170,7 @@ type Variant struct {
 	Kafka    map[string]any `yaml:"kafka,omitempty" json:"kafka,omitempty"`
 	Mongo    map[string]any `yaml:"mongo,omitempty" json:"mongo,omitempty"`
 	Postgres map[string]any `yaml:"postgres,omitempty" json:"postgres,omitempty"`
+	Logs     map[string]any `yaml:"logs,omitempty" json:"logs,omitempty"`
 
 	Expect *Expect `yaml:"expect,omitempty" json:"expect,omitempty"`
 }
@@ -234,6 +238,23 @@ type PostgresStep struct {
 	TimeoutMs int    `yaml:"timeoutMs,omitempty" json:"timeoutMs,omitempty"`
 }
 
+// LogsStep searches a log platform for entries written while the scenario
+// ran, so a test can assert on what the service itself logged.
+type LogsStep struct {
+	Provider string `yaml:"provider,omitempty" json:"provider,omitempty"` // datadog (default)
+	Site     string `yaml:"site,omitempty" json:"site,omitempty"`         // datadoghq.com (default), datadoghq.eu, us5.datadoghq.com ...
+	URL      string `yaml:"url,omitempty" json:"url,omitempty"`           // API base URL; overrides site
+	Query    string `yaml:"query" json:"query"`                           // provider search syntax, e.g. service:orders @orderId:{{orderId}}
+	// From: scenario_start (default) searches from the moment the scenario
+	// began. Anything else is passed to the provider (now-15m, an ISO time).
+	From      string `yaml:"from,omitempty" json:"from,omitempty"`
+	To        string `yaml:"to,omitempty" json:"to,omitempty"` // default now
+	Limit     int    `yaml:"limit,omitempty" json:"limit,omitempty"`
+	APIKey    string `yaml:"apiKey,omitempty" json:"apiKey,omitempty"` // use {{$env.DD_API_KEY}}
+	AppKey    string `yaml:"appKey,omitempty" json:"appKey,omitempty"` // use {{$env.DD_APP_KEY}}
+	TimeoutMs int    `yaml:"timeoutMs,omitempty" json:"timeoutMs,omitempty"`
+}
+
 // Expect describes what a passing result looks like. When it is omitted a
 // positive test expects success (HTTP 2xx, gRPC OK, query ran, message
 // found) and a negative test expects the opposite.
@@ -244,7 +265,7 @@ type Expect struct {
 	Headers       map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`             // header equals
 	Body          []Assertion       `yaml:"body,omitempty" json:"body,omitempty"`                   // checks on the JSON result
 	BodyContains  []string          `yaml:"bodyContains,omitempty" json:"bodyContains,omitempty"`   // raw substring checks
-	Count         *int              `yaml:"count,omitempty" json:"count,omitempty"`                 // rows / documents
+	Count         *int              `yaml:"count,omitempty" json:"count,omitempty"`                 // rows / documents / log entries
 	Found         *bool             `yaml:"found,omitempty" json:"found,omitempty"`                 // kafka: message arrived or not
 	MaxDurationMs int               `yaml:"maxDurationMs,omitempty" json:"maxDurationMs,omitempty"` // latency budget
 	// Error expects the call to fail before any response arrives (refused
@@ -305,6 +326,10 @@ func (s *Scenario) Validate() []string {
 			if t.Postgres == nil || t.Postgres.DSN == "" || t.Postgres.Query == "" {
 				add("%s: postgres.dsn and postgres.query are required", where)
 			}
+		case TypeLogs:
+			if t.Logs == nil || t.Logs.Query == "" {
+				add("%s: logs.query is required", where)
+			}
 		default:
 			add("%s: type must be one of %v", where, TestTypes)
 		}
@@ -323,6 +348,85 @@ func (s *Scenario) Validate() []string {
 		}
 	}
 	return errs
+}
+
+// SecretMask stands in for a stored secret in API responses. Sending it
+// back unchanged means "keep the stored value".
+const SecretMask = "********"
+
+func maskOne(v *string) {
+	// References such as {{$env.NAME}} are not secrets themselves.
+	if *v != "" && !strings.Contains(*v, "{{") {
+		*v = SecretMask
+	}
+}
+
+func keepOne(v *string, old string) {
+	if *v == SecretMask {
+		*v = old
+	}
+}
+
+// Masked returns a copy with literal secret values hidden.
+func (a AuthProfile) Masked() AuthProfile {
+	if a.Basic != nil {
+		c := *a.Basic
+		maskOne(&c.Password)
+		a.Basic = &c
+	}
+	if a.Bearer != nil {
+		c := *a.Bearer
+		maskOne(&c.Token)
+		a.Bearer = &c
+	}
+	if a.APIKey != nil {
+		c := *a.APIKey
+		maskOne(&c.Value)
+		a.APIKey = &c
+	}
+	if a.OAuth2 != nil {
+		c := *a.OAuth2
+		maskOne(&c.ClientSecret)
+		maskOne(&c.Password)
+		a.OAuth2 = &c
+	}
+	return a
+}
+
+// KeepSecrets replaces masked values in a with the ones stored in old.
+func (a *AuthProfile) KeepSecrets(old *AuthProfile) {
+	if old == nil {
+		old = &AuthProfile{}
+	}
+	if a.Basic != nil {
+		prev := ""
+		if old.Basic != nil {
+			prev = old.Basic.Password
+		}
+		keepOne(&a.Basic.Password, prev)
+	}
+	if a.Bearer != nil {
+		prev := ""
+		if old.Bearer != nil {
+			prev = old.Bearer.Token
+		}
+		keepOne(&a.Bearer.Token, prev)
+	}
+	if a.APIKey != nil {
+		prev := ""
+		if old.APIKey != nil {
+			prev = old.APIKey.Value
+		}
+		keepOne(&a.APIKey.Value, prev)
+	}
+	if a.OAuth2 != nil {
+		var ps, pp string
+		if old.OAuth2 != nil {
+			ps, pp = old.OAuth2.ClientSecret, old.OAuth2.Password
+		}
+		keepOne(&a.OAuth2.ClientSecret, ps)
+		keepOne(&a.OAuth2.Password, pp)
+	}
 }
 
 // Validate checks an auth profile and reports what is missing.

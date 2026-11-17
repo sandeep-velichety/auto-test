@@ -3,16 +3,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/testplane/testplane/internal/api"
 	"github.com/testplane/testplane/internal/auth"
@@ -29,7 +33,7 @@ var version = "0.1.0"
 const usage = `testplane - scenario based API, messaging and data test runner
 
 Usage:
-  testplane serve     --workspace DIR [--addr :8080]          web UI + REST API
+  testplane serve     --workspace DIR [--addr :8080] [--token T]   web UI + REST API
   testplane run       --workspace DIR --app ID [options]      run tests headless (CI/CD)
   testplane validate  --workspace DIR [--app ID]              check YAML and auth assets
   testplane list      --workspace DIR                         list applications and scenarios
@@ -103,12 +107,22 @@ func serve(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	ws := workspaceFlag(fs)
 	addr := fs.String("addr", "127.0.0.1:8080", "listen address (the API has no login; bind beyond localhost only on a trusted network)")
+	token := fs.String("token", os.Getenv("TESTPLANE_TOKEN"), "access token every API call must present (default $TESTPLANE_TOKEN; empty = no check)")
+	retention := fs.Int("retention-days", 0, "delete stored runs older than this many days (0 = keep all)")
+	var origins multi
+	fs.Var(&origins, "allow-origin", "web origin allowed to call this backend from a browser, e.g. https://tests.example.com; repeat, or * for any (default: any when a token is set)")
 	_ = fs.Parse(args)
 	if err := os.MkdirAll(filepath.Join(*ws, "applications"), 0o755); err != nil {
 		die(err)
 	}
 	srv := api.New(store.New(*ws), web.FS())
-	fmt.Printf("testplane %s\nworkspace %s\nlistening on http://%s\n", version, *ws, *addr)
+	srv.Token, srv.AllowOrigins, srv.RetentionDays = *token, csv(origins), *retention
+	srv.Prune()
+	access := "no access token (anyone who can reach this address can use it)"
+	if *token != "" {
+		access = "access token required"
+	}
+	fmt.Printf("testplane %s\nworkspace %s\n%s\nlistening on http://%s\n", version, *ws, access, *addr)
 	die(http.ListenAndServe(*addr, srv.Handler()))
 }
 
@@ -122,6 +136,8 @@ func run(args []string) int {
 	jsonOut := fs.String("json", "", "write the full JSON result to this file")
 	save := fs.Bool("save", false, "also store the run in the workspace so the UI lists it")
 	quiet := fs.Bool("quiet", false, "print only the summary")
+	publish := fs.String("publish", "", "also send the result to this backend so it appears in its history, e.g. https://tests.example.com (token from $TESTPLANE_TOKEN)")
+	by := fs.String("by", os.Getenv("USER"), "who or what started this run, recorded with it")
 	var scenarios, tags, vars multi
 	fs.Var(&scenarios, "scenario", "scenario id; repeat or comma-separate (default: all)")
 	fs.Var(&tags, "tag", "run scenarios carrying any of these tags; repeat or comma-separate")
@@ -148,7 +164,7 @@ func run(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	last := ""
-	opts := engine.Options{App: *app, Env: *env, Scenarios: csv(scenarios), Tags: csv(tags), Kind: *kind, Vars: overrides}
+	opts := engine.Options{App: *app, Env: *env, Scenarios: csv(scenarios), Tags: csv(tags), Kind: *kind, Vars: overrides, By: *by, Source: "cli"}
 	if !*quiet {
 		opts.OnTest = func(sc *model.Scenario, t *model.TestResult) {
 			if sc.ID != last {
@@ -190,6 +206,14 @@ func run(args []string) int {
 			ok = false
 		}
 	}
+	if *publish != "" {
+		if err := publishRun(*publish, os.Getenv("TESTPLANE_TOKEN"), res); err != nil {
+			fmt.Fprintln(os.Stderr, "error: publish:", err)
+			ok = false
+		} else {
+			fmt.Printf("published to %s\n", *publish)
+		}
+	}
 	switch {
 	case !ok:
 		return 2
@@ -200,6 +224,31 @@ func run(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func publishRun(base, token string, res *model.RunResult) error {
+	body, err := json.Marshal(res)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(base, "/")+"/api/apps/"+res.Application+"/runs", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
+		return fmt.Errorf("backend answered %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+	return nil
 }
 
 func validate(args []string) int {
@@ -275,6 +324,11 @@ func validate(args []string) int {
 				}
 			}
 			for _, r := range refs {
+				if owner, id, ok := strings.Cut(r, "/"); ok {
+					if _, err := st.GetAuth(owner, id); err == nil {
+						continue
+					}
+				}
 				if r != "" && !known[r] {
 					report(where, "auth profile "+r+" does not exist")
 					known[r] = true

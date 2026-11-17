@@ -20,7 +20,9 @@ environments:
 
 `{{name}}` is replaced in every string of a test, an expectation and an auth profile. Lowest to highest precedence: environment, scenario `variables`, `--var` overrides, values captured by earlier steps. An undefined variable fails the test with a clear message.
 
-Built in: `{{$uuid}}`, `{{$timestamp}}`, `{{$timestampMs}}`, `{{$isoTimestamp}}`, `{{$randomInt}}`, `{{$env.NAME}}`. Built-ins produce a new value each time they appear; put one in a scenario variable to reuse the same value across steps.
+Values of other applications are available as `{{app-id.name}}`, taken from that application's environment with the same name as the one being run, or else its default environment.
+
+Built in: `{{$scenarioStart}}` (ISO time the scenario began), `{{$uuid}}`, `{{$timestamp}}`, `{{$timestampMs}}`, `{{$isoTimestamp}}`, `{{$randomInt}}`, `{{$env.NAME}}`. Built-ins produce a new value each time they appear; put one in a scenario variable to reuse the same value across steps.
 
 ## Auth profiles (`assets/auth/<id>.yaml`)
 
@@ -92,9 +94,9 @@ tests: [...]
 | Field | Meaning |
 | --- | --- |
 | `id`, `name` | required; ids are lowercase letters, digits, `-`, `_` |
-| `type` | `http`, `grpc`, `kafka`, `mongo`, `postgres` |
+| `type` | `http`, `grpc`, `kafka`, `mongo`, `postgres`, `logs` |
 | `kind` | `positive` (default) or `negative` |
-| `auth` | profile id, or `none`; default inherits |
+| `auth` | profile id, `other-app/profile-id` to borrow another application's profile, or `none`; default inherits |
 | `properties` | free-form labels |
 | `expect` | see below |
 | `capture` | `name: path`; also `$status` and `$header.Name` |
@@ -198,13 +200,38 @@ The result document is `{count, documents: [...]}` in relaxed extended JSON, so 
 
 The result document is `{count, rows: [{column: value}]}`. Any statement can be used, which is handy for set-up and clean-up steps.
 
+### logs
+
+```yaml
+- id: order-logged
+  name: The service logged the order
+  type: logs
+  retry: {attempts: 6, delayMs: 5000}     # logs take a few seconds to become searchable
+  logs:
+    provider: datadog                     # the only provider so far
+    site: datadoghq.com                   # or datadoghq.eu, us5.datadoghq.com, ...
+    query: "service:orders @orderId:{{orderId}}"
+    from: scenario_start                  # default; or now-15m, or an ISO time
+    limit: 50
+    apiKey: "{{$env.DD_API_KEY}}"
+    appKey: "{{$env.DD_APP_KEY}}"
+  expect:
+    body:
+      - {path: logs.0.message, op: contains, value: created}
+      - {path: logs.0.attributes.http.status_code, value: 201}
+```
+
+Uses Datadog's Logs Search API (`POST /api/v2/logs/events/search`), which needs both an API key and an application key. The result document is `{count, logs: [{id, timestamp, status, service, host, message, tags, attributes}]}`, oldest first. Keys can also come from an `api_key` auth profile whose header name is `DD-API-KEY`. Both keys are masked in stored run results.
+
+A borrowed profile's own placeholders are filled from its owner's environment: `orders/orders-oauth` with `tokenUrl: "{{baseUrl}}/oauth/token"` uses the `orders` application's `baseUrl`.
+
 ## expect
 
 | Field | Applies to | Meaning |
 | --- | --- | --- |
 | `status`, `statusIn` | http | exact status, or any of a list |
 | `code` | grpc | code name such as `NOT_FOUND` |
-| `count` | mongo, postgres | exact number of documents or rows |
+| `count` | mongo, postgres, logs | exact number of documents, rows or log entries |
 | `found` | kafka | `true` or `false` |
 | `headers` | http | response header equals |
 | `body` | all | list of checks on the result document |
@@ -219,7 +246,7 @@ When the main check (`status`, `code`, `count`, `found`) is left out, a default 
 | http | status is 2xx | status is not 2xx |
 | grpc | code is OK | code is not OK |
 | kafka consume | a matching message arrives | none arrives |
-| mongo, postgres read | at least one document or row | none |
+| mongo, postgres read, logs | at least one document, row or log entry | none |
 | postgres non-SELECT | the statement runs | the statement runs |
 
 A check is `{path, op, value}`. Paths use [gjson syntax](https://github.com/tidwall/gjson/blob/master/SYNTAX.md): `id`, `items.0.sku`, `items.#` (array length), `items.#(sku=="A1").qty`. Operators: `equals` (default), `not_equals`, `contains`, `not_contains`, `matches` (regular expression), `exists`, `not_exists`, `gt`, `gte`, `lt`, `lte`, `length`, `in`. Comparison is loose about numbers and strings, so a captured `"42"` equals `42`.
@@ -239,20 +266,23 @@ variants:
     expect: {status: 403}
 ```
 
-The override block is named after the parent's type (`http`, `grpc`, `kafka`, `mongo`, `postgres`). Maps merge key by key; lists and scalars are replaced. Result ids are `<test>.<case>`.
+The override block is named after the parent's type (`http`, `grpc`, `kafka`, `mongo`, `postgres`, `logs`). Maps merge key by key; lists and scalars are replaced. Result ids are `<test>.<case>`.
 
 ## REST API
 
-All under `/api`; bodies are JSON unless noted.
+All under `/api`; bodies are JSON unless noted. When the backend was started with a token, every call except `GET /meta` needs `Authorization: Bearer <token>`. `X-Testplane-User: <name>` on a run request is recorded as who started it.
 
 | Method and path | Purpose |
 | --- | --- |
+| `GET /meta` | health check; says whether a token is required |
 | `GET /apps`, `GET/PUT/DELETE /apps/{app}` | applications |
 | `GET /apps/{app}/scenarios`, `GET/PUT/DELETE /apps/{app}/scenarios/{id}` | scenarios |
 | `GET/PUT /apps/{app}/scenarios/{id}/yaml` | the stored file, as text |
-| `GET /apps/{app}/auth`, `PUT/DELETE /apps/{app}/auth/{id}` | auth profiles, with certificate checks |
+| `GET /apps/{app}/auth`, `PUT/DELETE /apps/{app}/auth/{id}` | auth profiles with certificate checks; secrets come back as `********`, and sending `********` keeps the stored value |
 | `POST /apps/{app}/auth/{id}/check?env=` | try a profile: load certificates, fetch the token |
-| `GET /apps/{app}/assets`, `PUT/DELETE /apps/{app}/assets/{certs\|protos}/{name}` | files (raw body on upload) |
-| `POST /apps/{app}/run` | `{environment, scenarios, tags, kind, vars}`; returns the result |
-| `GET /apps/{app}/runs`, `GET /apps/{app}/runs/{id}` | run history |
-| `GET /apps/{app}/export`, `POST /import` | zip out, zip in |
+| `GET /apps/{app}/assets`, `PUT/DELETE /apps/{app}/assets/{certs\|protos}/{name}` | files (raw body on upload); contents are never returned |
+| `POST /apps/{app}/run` | `{environment, scenarios, tags, kind, vars}`; runs, stores and returns the result |
+| `GET /apps/{app}/runs?scenario=&status=&env=&from=&to=&limit=` | history, newest first, without test detail; dates are `YYYY-MM-DD` or RFC 3339; with `scenario`, status and totals describe that scenario |
+| `GET /apps/{app}/runs/{id}` | one run in full |
+| `POST /apps/{app}/runs` | store a result produced elsewhere (`testplane run --publish`) |
+| `GET /apps/{app}/export`, `POST /import` | zip out (no keys, no literal secrets), zip in |

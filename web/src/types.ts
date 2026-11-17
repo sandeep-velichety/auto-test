@@ -39,17 +39,17 @@ export interface Expect {
 
 export interface Variant {
   id: string; name: string; kind?: string; auth?: string; properties?: Dict; skip?: boolean
-  http?: any; grpc?: any; kafka?: any; mongo?: any; postgres?: any
+  http?: any; grpc?: any; kafka?: any; mongo?: any; postgres?: any; logs?: any
   expect?: Expect
 }
 
-export type TestType = 'http' | 'grpc' | 'kafka' | 'mongo' | 'postgres'
+export type TestType = 'http' | 'grpc' | 'kafka' | 'mongo' | 'postgres' | 'logs'
 
 export interface Test {
   id: string; name: string; description?: string; type: TestType; kind?: string; auth?: string
   properties?: Dict; skip?: boolean; continueOnFail?: boolean
   retry?: { attempts: number; delayMs?: number }
-  http?: any; grpc?: any; kafka?: any; mongo?: any; postgres?: any
+  http?: any; grpc?: any; kafka?: any; mongo?: any; postgres?: any; logs?: any
   expect?: Expect; capture?: Dict; variants?: Variant[]
 }
 
@@ -76,9 +76,14 @@ export interface TestResult {
 export interface ScenarioResult { id: string; name: string; status: string; durationMs: number; tests: TestResult[] | null }
 
 export interface RunResult {
-  id: string; application: string; environment?: string; startedAt: string; durationMs: number; status: string
+  id: string; application: string; environment?: string; triggeredBy?: string; source?: string; startedAt: string; durationMs: number; status: string
   summary: { total: number; passed: number; failed: number; skipped: number }
   scenarios: ScenarioResult[]
 }
 
 export interface AuthCheckResult { ok: boolean; error?: string; sends?: string[]; clientCert: boolean; certChecks?: CertCheck[] }
+
+/** A backend the UI can connect to. url '' means the server this page came from. */
+export interface Backend { id: string; name: string; url: string; token?: string; user?: string }
+
+export interface RunQuery { scenario?: string; status?: string; env?: string; from?: string; to?: string; limit?: number }

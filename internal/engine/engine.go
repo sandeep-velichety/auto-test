@@ -29,6 +29,8 @@ type Options struct {
 	Tags      []string          // any-of filter on scenario tags
 	Kind      string            // "", positive (skip negative cases) or negative (skip positive variants)
 	Vars      map[string]string // overrides environment and scenario variables
+	By        string            // who started the run, recorded with it
+	Source    string            // server | cli
 	// OnTest is called as each test finishes (for live CLI output).
 	OnTest func(scenario *model.Scenario, r *model.TestResult)
 }
@@ -57,6 +59,25 @@ func (e *Engine) Run(ctx context.Context, o Options) (*model.RunResult, error) {
 		}
 		for k, v := range env {
 			base[k] = v
+		}
+	}
+	// Other applications' environment values are visible as {{app-id.name}},
+	// so a flow scenario can call several services. Each one contributes the
+	// environment with the same name, or else its own default.
+	appEnv := map[string]map[string]string{app.ID: copyVars(base)}
+	if others, err := e.Store.ListApps(); err == nil {
+		for _, o := range others {
+			if o.ID == app.ID {
+				continue
+			}
+			env, ok := o.Environments[envName]
+			if !ok {
+				env = o.Environments[o.DefaultEnvironment]
+			}
+			appEnv[o.ID] = copyVars(env)
+			for k, v := range env {
+				base[o.ID+"."+k] = v
+			}
 		}
 	}
 	all, err := e.Store.ListScenarios(app.ID)
@@ -88,12 +109,12 @@ func (e *Engine) Run(ctx context.Context, o Options) (*model.RunResult, error) {
 	_, _ = rand.Read(suffix)
 	run := &model.RunResult{
 		ID:          start.UTC().Format("20060102-150405") + "-" + hex.EncodeToString(suffix),
-		Application: app.ID, Environment: envName, StartedAt: start.UTC(),
+		Application: app.ID, Environment: envName, StartedAt: start.UTC(), TriggeredBy: o.By, Source: o.Source,
 		Status: model.StatusPassed, Scenarios: []model.ScenarioResult{},
 	}
-	resolver := auth.NewResolver(e.Store.AssetDir(app.ID, "certs"))
+	shared := &runShared{store: e.Store, appEnv: appEnv, resolvers: map[string]*auth.Resolver{}}
 	for i := range selected {
-		sr := e.runScenario(ctx, app, &selected[i], base, resolver, o)
+		sr := e.runScenario(ctx, app, &selected[i], base, shared, o)
 		run.Scenarios = append(run.Scenarios, sr)
 		for _, t := range sr.Tests {
 			run.Summary.Total++
@@ -112,6 +133,32 @@ func (e *Engine) Run(ctx context.Context, o Options) (*model.RunResult, error) {
 	}
 	run.DurationMs = time.Since(start).Milliseconds()
 	return run, nil
+}
+
+func copyVars(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// runShared is state kept for a whole run: one credential resolver per
+// application (so tokens are fetched once) and every application's
+// environment values.
+type runShared struct {
+	store     *store.Store
+	appEnv    map[string]map[string]string
+	resolvers map[string]*auth.Resolver
+}
+
+func (s *runShared) resolver(app string) *auth.Resolver {
+	r, ok := s.resolvers[app]
+	if !ok {
+		r = auth.NewResolver(s.store.AssetDir(app, "certs"))
+		s.resolvers[app] = r
+	}
+	return r
 }
 
 func anyTag(have, want []string) bool {
@@ -137,15 +184,16 @@ type spec struct {
 }
 
 type scenarioRun struct {
-	e        *Engine
-	app      *model.Application
-	sc       *model.Scenario
-	vars     map[string]string
-	resolver *auth.Resolver
-	kafka    *executor.KafkaSession
+	e       *Engine
+	app     *model.Application
+	sc      *model.Scenario
+	vars    map[string]string
+	shared  *runShared
+	kafka   *executor.KafkaSession
+	started time.Time
 }
 
-func (e *Engine) runScenario(ctx context.Context, app *model.Application, sc *model.Scenario, base map[string]string, resolver *auth.Resolver, o Options) model.ScenarioResult {
+func (e *Engine) runScenario(ctx context.Context, app *model.Application, sc *model.Scenario, base map[string]string, shared *runShared, o Options) model.ScenarioResult {
 	start := time.Now()
 	res := model.ScenarioResult{ID: sc.ID, Name: sc.Name, Status: model.StatusPassed, Tests: []model.TestResult{}}
 	emit := func(r model.TestResult) {
@@ -175,13 +223,14 @@ func (e *Engine) runScenario(ctx context.Context, app *model.Application, sc *mo
 	for k, v := range o.Vars {
 		vars[k] = v
 	}
+	vars["$scenarioStart"] = start.UTC().Format(time.RFC3339)
 	r := newRenderer(vars)
 	for k, v := range sc.Variables {
 		if _, overridden := o.Vars[k]; !overridden {
 			vars[k] = r.str(v)
 		}
 	}
-	run := &scenarioRun{e: e, app: app, sc: sc, vars: vars, resolver: resolver, kafka: executor.NewKafkaSession()}
+	run := &scenarioRun{e: e, app: app, sc: sc, vars: vars, shared: shared, kafka: executor.NewKafkaSession(), started: start}
 	run.markKafka(ctx)
 
 	halted := ""
@@ -272,6 +321,8 @@ func stepBlock(t *model.Test) any {
 		return t.Mongo
 	case model.TypePostgres:
 		return t.Postgres
+	case model.TypeLogs:
+		return t.Logs
 	}
 	return nil
 }
@@ -288,6 +339,8 @@ func variantOverride(typ string, v *model.Variant) map[string]any {
 		return v.Mongo
 	case model.TypePostgres:
 		return v.Postgres
+	case model.TypeLogs:
+		return v.Logs
 	}
 	return nil
 }
@@ -306,11 +359,24 @@ func (r *scenarioRun) authFor(id string) string {
 	return id
 }
 
+// credentials resolves a profile id. "other-app/profile" borrows a profile
+// (and its certificates) from another application; its placeholders are
+// filled from that application's environment first.
 func (r *scenarioRun) credentials(ctx context.Context, id string) (*auth.Credentials, error) {
 	if id == model.AuthNone {
 		return auth.None(), nil
 	}
-	p, err := r.e.Store.GetAuth(r.app.ID, id)
+	appID, profileID, vars := r.app.ID, id, r.vars
+	if owner, rest, ok := strings.Cut(id, "/"); ok {
+		appID, profileID = owner, rest
+		if appID != r.app.ID {
+			vars = copyVars(r.vars)
+			for k, v := range r.shared.appEnv[appID] {
+				vars[k] = v
+			}
+		}
+	}
+	p, err := r.e.Store.GetAuth(appID, profileID)
 	if err != nil {
 		return nil, fmt.Errorf("auth profile %q: %w", id, err)
 	}
@@ -318,7 +384,7 @@ func (r *scenarioRun) credentials(ctx context.Context, id string) (*auth.Credent
 	if err != nil {
 		return nil, err
 	}
-	rd := newRenderer(r.vars)
+	rd := newRenderer(vars)
 	rendered := rd.value(m)
 	if err := rd.err(); err != nil {
 		return nil, fmt.Errorf("auth profile %q: %w", id, err)
@@ -327,8 +393,8 @@ func (r *scenarioRun) credentials(ctx context.Context, id string) (*auth.Credent
 	if err := fromMap(rendered, &out); err != nil {
 		return nil, err
 	}
-	out.ID = id
-	return r.resolver.Resolve(ctx, &out)
+	out.ID = profileID
+	return r.shared.resolver(appID).Resolve(ctx, &out)
 }
 
 // markKafka notes the end of every topic a consume step will read, before
@@ -389,7 +455,7 @@ func (r *scenarioRun) runOne(ctx context.Context, s spec) model.TestResult {
 	if err := rd.err(); err != nil {
 		return fail(err)
 	}
-	tr.Request = block
+	tr.Request = redact(block)
 
 	exec, err := r.prepare(s.typ, block)
 	if err != nil {
@@ -451,6 +517,25 @@ func (r *scenarioRun) runOne(ctx context.Context, s spec) model.TestResult {
 	return tr
 }
 
+// redact hides credential fields before a request is stored with a run.
+func redact(block map[string]any) map[string]any {
+	out := copyAny(block)
+	for _, k := range []string{"apiKey", "appKey"} {
+		if v, ok := out[k].(string); ok && v != "" {
+			out[k] = model.SecretMask
+		}
+	}
+	return out
+}
+
+func copyAny(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
 type execFn func(ctx context.Context, creds *auth.Credentials) (*model.Response, error)
 
 func (r *scenarioRun) prepare(typ string, block map[string]any) (execFn, error) {
@@ -495,6 +580,14 @@ func (r *scenarioRun) prepare(typ string, block map[string]any) (execFn, error) 
 		}
 		return func(ctx context.Context, c *auth.Credentials) (*model.Response, error) {
 			return executor.Postgres(ctx, &s, c)
+		}, nil
+	case model.TypeLogs:
+		var s model.LogsStep
+		if err := fromMap(block, &s); err != nil {
+			return nil, fmt.Errorf("logs: %w", err)
+		}
+		return func(ctx context.Context, c *auth.Credentials) (*model.Response, error) {
+			return executor.Logs(ctx, &s, c, r.started)
 		}, nil
 	}
 	return nil, fmt.Errorf("unknown test type %q", typ)
@@ -570,10 +663,13 @@ func evaluate(s spec, x *model.Expect, resp *model.Response, err error) ([]model
 			}
 			add(label, found == want, strconv.FormatBool(want), strconv.FormatBool(found))
 		}
-	case model.TypeMongo, model.TypePostgres:
+	case model.TypeMongo, model.TypePostgres, model.TypeLogs:
 		count := int(gjson.Get(resp.JSON, "count").Int())
 		noun := "documents"
 		isRead := true
+		if s.typ == model.TypeLogs {
+			noun = "log entries"
+		}
 		if s.typ == model.TypePostgres {
 			noun = "rows"
 			q, _ := s.block["query"].(string)

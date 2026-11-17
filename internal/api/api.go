@@ -4,12 +4,14 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +26,17 @@ type Server struct {
 	Store  *store.Store
 	Engine *engine.Engine
 	UI     fs.FS // built front end; nil serves the API only
+
+	// Token, when set, must accompany every API call as
+	// "Authorization: Bearer <token>" (except /api/meta and preflights).
+	Token string
+	// AllowOrigins lists web origins other than the server's own that may
+	// call the API from a browser. "*" allows any. When empty, any origin is
+	// allowed if a token is set (requests still need the token) and none
+	// otherwise.
+	AllowOrigins []string
+	// RetentionDays, when positive, deletes stored runs older than this.
+	RetentionDays int
 }
 
 func New(s *store.Store, ui fs.FS) *Server {
@@ -65,13 +78,64 @@ func decode(r *http.Request, v any) error {
 	return nil
 }
 
+func (s *Server) originAllowed(origin string) bool {
+	if len(s.AllowOrigins) == 0 {
+		return s.Token != ""
+	}
+	for _, o := range s.AllowOrigins {
+		if o == "*" || strings.EqualFold(strings.TrimRight(o, "/"), origin) {
+			return true
+		}
+	}
+	return false
+}
+
+// guard adds CORS headers and enforces the access token on API routes.
+func (s *Server) guard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if origin := r.Header.Get("Origin"); origin != "" && s.originAllowed(origin) {
+			h := w.Header()
+			h.Set("Access-Control-Allow-Origin", origin)
+			h.Add("Vary", "Origin")
+			h.Set("Access-Control-Allow-Methods", "GET, PUT, POST, DELETE, OPTIONS")
+			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Testplane-User")
+			h.Set("Access-Control-Max-Age", "600")
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if s.Token != "" && r.URL.Path != "/api/meta" {
+			got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if !ok || subtle.ConstantTimeCompare([]byte(got), []byte(s.Token)) != 1 {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "this backend needs its access token"})
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Prune applies the retention setting once.
+func (s *Server) Prune() {
+	if s.RetentionDays > 0 {
+		_, _ = s.Store.PruneRuns(time.Now().AddDate(0, 0, -s.RetentionDays))
+	}
+}
+
 // Handler builds the routes.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	st := s.Store
 
+	// Open on purpose: it is the health check and tells a client whether a
+	// token is needed. It reveals nothing about the workspace.
 	mux.HandleFunc("GET /api/meta", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"testTypes": model.TestTypes, "authTypes": model.AuthTypes, "assertionOps": assert.Ops, "workspace": st.Root})
+		writeJSON(w, 200, map[string]any{"name": "testplane", "authRequired": s.Token != "", "testTypes": model.TestTypes, "authTypes": model.AuthTypes, "assertionOps": assert.Ops})
 	})
 
 	// applications
@@ -114,7 +178,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/apps/{app}/export", func(w http.ResponseWriter, r *http.Request) {
 		app := r.PathValue("app")
 		var buf bytes.Buffer
-		if err := st.ExportApp(app, &buf, r.URL.Query().Get("keys") == "true"); err != nil {
+		// Keys and literal secrets never leave through the API.
+		if err := st.ExportApp(app, &buf, false); err != nil {
 			fail(w, err)
 			return
 		}
@@ -198,7 +263,8 @@ func (s *Server) Handler() http.Handler {
 
 	// auth profiles
 	view := func(app string, p model.AuthProfile) authView {
-		return authView{AuthProfile: p, CertChecks: auth.CertChecks(&p, st.AssetDir(app, "certs"))}
+		// Stored secrets are write-only: they go out masked.
+		return authView{AuthProfile: p.Masked(), CertChecks: auth.CertChecks(&p, st.AssetDir(app, "certs"))}
 	}
 	mux.HandleFunc("GET /api/apps/{app}/auth", func(w http.ResponseWriter, r *http.Request) {
 		app := r.PathValue("app")
@@ -220,6 +286,9 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		p.ID = r.PathValue("id")
+		// A masked value coming back means "leave the stored secret alone".
+		old, _ := st.GetAuth(r.PathValue("app"), p.ID)
+		p.KeepSecrets(old)
 		if err := st.SaveAuth(r.PathValue("app"), &p); err != nil {
 			fail(w, err)
 			return
@@ -288,7 +357,8 @@ func (s *Server) Handler() http.Handler {
 			badRequest(w, "kind must be positive, negative or empty")
 			return
 		}
-		res, err := s.Engine.Run(r.Context(), engine.Options{App: r.PathValue("app"), Env: req.Environment, Scenarios: req.Scenarios, Tags: req.Tags, Kind: req.Kind, Vars: req.Vars})
+		res, err := s.Engine.Run(r.Context(), engine.Options{App: r.PathValue("app"), Env: req.Environment, Scenarios: req.Scenarios, Tags: req.Tags, Kind: req.Kind, Vars: req.Vars,
+			By: clip(r.Header.Get("X-Testplane-User"), 80), Source: "server"})
 		if err != nil {
 			fail(w, err)
 			return
@@ -297,15 +367,59 @@ func (s *Server) Handler() http.Handler {
 			fail(w, err)
 			return
 		}
+		s.Prune()
 		writeJSON(w, 200, res)
 	})
+	// History. Filters: scenario, status, env, from, to (RFC 3339 or
+	// YYYY-MM-DD), limit.
 	mux.HandleFunc("GET /api/apps/{app}/runs", func(w http.ResponseWriter, r *http.Request) {
-		list, err := st.ListRuns(r.PathValue("app"), 50)
+		q := r.URL.Query()
+		f := store.RunFilter{Scenario: q.Get("scenario"), Status: q.Get("status"), Environment: q.Get("env"), Limit: 100}
+		if n, err := strconv.Atoi(q.Get("limit")); err == nil && n > 0 {
+			f.Limit = min(n, 1000)
+		}
+		var err error
+		if f.From, err = parseTime(q.Get("from"), false); err != nil {
+			badRequest(w, "from: "+err.Error())
+			return
+		}
+		if f.To, err = parseTime(q.Get("to"), true); err != nil {
+			badRequest(w, "to: "+err.Error())
+			return
+		}
+		list, err := st.ListRuns(r.PathValue("app"), f)
 		if err != nil {
 			fail(w, err)
 			return
 		}
 		writeJSON(w, 200, list)
+	})
+	// Lets a pipeline store the result of a headless run here
+	// (testplane run --publish URL).
+	mux.HandleFunc("POST /api/apps/{app}/runs", func(w http.ResponseWriter, r *http.Request) {
+		var res model.RunResult
+		if err := json.NewDecoder(io.LimitReader(r.Body, 50<<20)).Decode(&res); err != nil {
+			badRequest(w, "request body: "+err.Error())
+			return
+		}
+		if res.Application != r.PathValue("app") {
+			badRequest(w, "run belongs to application "+res.Application)
+			return
+		}
+		if _, err := st.GetApp(res.Application); err != nil {
+			fail(w, err)
+			return
+		}
+		if res.StartedAt.IsZero() || res.Scenarios == nil {
+			badRequest(w, "not a run result")
+			return
+		}
+		if err := st.SaveRun(&res); err != nil {
+			fail(w, err)
+			return
+		}
+		s.Prune()
+		writeJSON(w, 201, map[string]string{"id": res.ID})
 	})
 	mux.HandleFunc("GET /api/apps/{app}/runs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		res, err := st.GetRun(r.PathValue("app"), r.PathValue("id"))
@@ -333,5 +447,32 @@ func (s *Server) Handler() http.Handler {
 			files.ServeHTTP(w, r)
 		})
 	}
-	return mux
+	return s.guard(mux)
+}
+
+func clip(v string, n int) string {
+	v = strings.TrimSpace(v)
+	if len(v) > n {
+		v = v[:n]
+	}
+	return v
+}
+
+// parseTime accepts RFC 3339 or a plain date. A plain date used as an upper
+// bound covers that whole day.
+func parseTime(v string, endOfDay bool) (time.Time, error) {
+	if v == "" {
+		return time.Time{}, nil
+	}
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t, nil
+	}
+	t, err := time.Parse("2006-01-02", v)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("use YYYY-MM-DD or RFC 3339")
+	}
+	if endOfDay {
+		t = t.Add(24*time.Hour - time.Nanosecond)
+	}
+	return t, nil
 }

@@ -47,7 +47,10 @@ Everything is set with command-line flags; there is no config file.
 | --- | --- | --- | --- |
 | all | `--workspace DIR` | `workspace`, or `$TESTPLANE_WORKSPACE` | workspace folder |
 | `serve` | `--addr HOST:PORT` | `127.0.0.1:8080` | listen address |
-| `run` | `--app`, `--env`, `--scenario`, `--tag`, `--kind`, `--var`, `--junit`, `--json`, `--save`, `--quiet` | | see the README |
+| `serve` | `--token T` | `$TESTPLANE_TOKEN` | access token every API call must present; empty means no check |
+| `serve` | `--allow-origin URL` | any origin when a token is set, otherwise none | other web origins whose UI may connect to this backend; repeatable, `*` for any |
+| `serve` | `--retention-days N` | `0` (keep all) | delete stored runs older than N days |
+| `run` | `--app`, `--env`, `--scenario`, `--tag`, `--kind`, `--var`, `--junit`, `--json`, `--save`, `--publish`, `--by`, `--quiet` | | see the README |
 | `validate` | `--app ID` | all applications | check YAML, auth references and certificate files |
 | `demo` | `--http`, `--grpc`, `--mtls`, `--workspace` | `127.0.0.1:8089/8090/8091` | sample system, for trying the tool only |
 
@@ -56,6 +59,7 @@ Environment variables the process reads:
 | Variable | Used for |
 | --- | --- |
 | `TESTPLANE_WORKSPACE` | default for `--workspace` |
+| `TESTPLANE_TOKEN` | the backend's access token for `serve`; the token to present for `run --publish` |
 | anything referenced as `{{$env.NAME}}` | secrets in auth profiles and tests |
 | `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` | honoured by HTTP steps and OAuth2 token requests |
 
@@ -81,7 +85,7 @@ Wants=network-online.target
 User=testplane
 Group=testplane
 ExecStart=/usr/local/bin/testplane serve --workspace /var/lib/testplane/workspace --addr 127.0.0.1:8080
-# Secrets referenced as {{$env.NAME}} in auth profiles:
+# TESTPLANE_TOKEN (the access token) and secrets referenced as {{$env.NAME}}:
 EnvironmentFile=-/etc/testplane/secrets.env
 Restart=on-failure
 NoNewPrivileges=true
@@ -163,6 +167,7 @@ apiVersion: v1
 kind: Secret
 metadata: {name: testplane-secrets}
 stringData:
+  TESTPLANE_TOKEN: change-me             # access token testers enter in the UI
   ORDERS_CLIENT_SECRET: change-me        # referenced as {{$env.ORDERS_CLIENT_SECRET}}
 ---
 apiVersion: apps/v1
@@ -206,10 +211,28 @@ Check the uid with `docker run --rm --entrypoint id <image>` and adjust `runAsUs
 
 ## Access control
 
-**The API and UI have no login.** Anyone who can reach the port can read auth profiles (including secrets written directly into them), upload files and start runs that call your systems with your credentials. Treat network reachability as the permission.
+Start every shared backend with an access token:
 
-- Bind to `127.0.0.1` (the default) and publish it through a reverse proxy that authenticates: your SSO proxy (oauth2-proxy, Pomerium, an identity-aware ingress) or, at minimum, basic auth over TLS.
-- Do not expose it to the internet.
+```bash
+TESTPLANE_TOKEN="$(openssl rand -hex 32)" testplane serve --workspace /srv/testplane/qa --addr 0.0.0.0:8080
+```
+
+What the token does and does not do:
+
+- Every API call must present it, so nobody can list applications, change tests, upload files or start runs without it. `GET /api/meta` stays open as the health check.
+- It is one shared secret per backend, not per-user accounts. Anyone holding it can do everything. Rotate it by restarting with a new value. For named users and sign-on, put your SSO proxy (oauth2-proxy, Pomerium, an identity-aware ingress) in front as well.
+- It travels in a request header, so serve the backend over TLS (terminate it at a proxy or ingress). Over plain HTTP the token can be read on the network.
+- **Without a token the backend is open** to anyone who can reach the port. That is acceptable on `127.0.0.1` (the default address) and nowhere else.
+
+Even with the token, stored secrets are write-only through the API: auth profile secrets come back masked, key files are never returned and zip exports contain neither.
+
+**Connecting a UI to several backends.** Any backend's UI can connect to any other backend: testers add the address and token under "Backends". For the browser to allow it, the target backend must permit the calling page's origin. With a token set, every origin is permitted by default (the token is what protects it). To restrict that, list the allowed UI origins:
+
+```bash
+testplane serve … --token "$TOKEN" --allow-origin https://tests.example.com
+```
+
+A backend without a token only accepts its own UI unless `--allow-origin` is given.
 
 Minimal nginx example with TLS and basic auth:
 
@@ -253,7 +276,7 @@ applications/*/assets/certs/*.key
 
 Flow that works well: testers edit in the UI on a shared instance, someone commits and opens a pull request, pipelines run what is on the main branch. Testplane does not commit or pull for you.
 
-To hand an application to another team without Git, use **Download as zip** in the UI (or `GET /api/apps/{id}/export`) and **Import zip** on the other side. Private keys are left out of the zip unless `?keys=true` is added.
+To hand an application to another team without Git, use **Download as zip** in the UI (or `GET /api/apps/{id}/export`) and **Import zip** on the other side. Private keys are left out of the zip and stored secrets are replaced with `CHANGE_ME`; the receiving team supplies its own.
 
 ## Running in CI/CD
 
@@ -357,6 +380,17 @@ steps:
 
 In the JUnit file each scenario is a test suite and each test or case is a test case named `[kind] name`, with the test's properties attached.
 
+### Publishing pipeline runs to a backend
+
+A pipeline can keep its history on the shared backend, next to the runs testers start from the UI:
+
+```bash
+TESTPLANE_TOKEN="$BACKEND_TOKEN" testplane run --workspace . --app orders --env staging \
+  --junit reports/junit.xml --publish https://tests.example.com --by "pipeline #$BUILD_NUMBER"
+```
+
+The application must exist on that backend. The tests still run on the build agent; only the result is sent.
+
 ## Secrets and certificates
 
 - **Secrets:** write `{{$env.NAME}}` in an auth profile instead of the value, and provide `NAME` to the process (systemd `EnvironmentFile`, container env, Kubernetes Secret, CI secret). The value is resolved at run time and is not written back to disk. A missing variable fails the test with "undefined variable".
@@ -364,7 +398,9 @@ In the JUnit file each scenario is a test suite and each test or case is a test 
 - **Certificates:** PEM files in `applications/<id>/assets/certs`. Private keys must be unencrypted PEM. The API lists what a file is (certificate, key, subject, expiry) and never returns its contents. Uploaded files are written with mode `0600`.
 - **Keys in pipelines:** keep the key out of Git and write it into `assets/certs/` from a CI secret before the run, as in the GitHub Actions example.
 - **Expiry:** `testplane validate` fails when a referenced certificate is missing, expired, of the wrong kind or does not match its key. Running it on a schedule gives early warning.
-- **Run history** (`.runs/`) stores requests and responses of each test, truncated at 64 KB per body. Tokens added by auth profiles are not recorded; anything you put in a step's own headers or body is.
+- **Run history** (`.runs/`) stores requests and responses of each test, truncated at 64 KB per body. Tokens added by auth profiles are not recorded and Datadog keys are masked; anything else you put in a step's own headers or body is stored.
+- **Datadog keys** for `logs` steps: provide `DD_API_KEY` and `DD_APP_KEY` to the backend process and reference them as `{{$env.DD_API_KEY}}` and `{{$env.DD_APP_KEY}}`. The application key needs permission to read logs.
+- **Browser storage:** the UI remembers each backend's address and token in the browser's local storage on the tester's machine.
 
 ## Network access
 
@@ -374,7 +410,7 @@ The process running the tests needs to reach what the tests call: the HTTP and g
 
 **Backup.** Copy the workspace folder. If it is in Git, `applications/` is already safe and only `.runs/` and private keys need a separate copy.
 
-**Run history size.** Every run from the UI (and every CLI run with `--save`) adds one JSON file under `.runs/<app>/`. Nothing prunes them. A cron entry does:
+**Run history.** Every run from the UI, every published pipeline run and every CLI run with `--save` adds one JSON file under `.runs/<app>/`, named by start time. Start the backend with `--retention-days N` to delete older runs automatically (checked at start-up and after each stored run). Without it nothing is pruned; a cron entry also works:
 
 ```bash
 find /var/lib/testplane/workspace/.runs -name '*.json' -mtime +30 -delete
@@ -394,6 +430,8 @@ find /var/lib/testplane/workspace/.runs -name '*.json' -mtime +30 -delete
 | `auth profile "…": token endpoint … answered 401` | wrong client id or secret, or `{{$env.…}}` resolved to the wrong value |
 | `x509: certificate signed by unknown authority` | the service uses a private CA: add it as the profile's CA bundle |
 | `remote error: tls: … certificate required` | the service wants a client certificate: use an mTLS profile |
+| `this backend needs its access token` | the backend was started with `--token`: enter it under Backends, or set `TESTPLANE_TOKEN` for `run --publish` |
+| "Cannot reach …" when adding a backend | wrong address, backend down, or it does not allow this page's origin (start it with a token or `--allow-origin`) |
 | UI shows "UI not built" | the binary was built without `web/dist`: run `make ui` and rebuild |
 | Kafka step connects, then times out | brokers advertise an address the runner cannot reach |
 | `permission denied` writing the workspace in Docker | the mounted folder is not writable by the container user |
@@ -412,5 +450,5 @@ docker compose -f examples/docker-compose.yml down -v
 
 So you know what to trust on first use:
 
-- Verified by automated tests or by running it: the binary, the CLI, the REST API, the UI, HTTP, gRPC, OAuth2, mTLS and Postgres steps, and the Postgres steps of the `data-demo` scenario.
-- Written but not yet run, because the build environment had no Docker daemon, Kafka broker or MongoDB server: the `Dockerfile`, `examples/docker-compose.yml`, the Kubernetes manifest and the CI snippets on this page, and the Kafka and Mongo steps. Expect to adjust small details the first time you use them.
+- Verified by automated tests or by running it: the binary, the CLI, the REST API, the UI, access tokens and cross-backend connections, run history and publishing, HTTP, gRPC, OAuth2, mTLS and Postgres steps, cross-application flows, and the Postgres steps of the `data-demo` scenario.
+- Written but not yet run, because the build environment had no Docker daemon, Kafka broker or MongoDB server: the `Dockerfile`, `examples/docker-compose.yml`, the Kubernetes manifest and the CI snippets on this page, and the Kafka and Mongo steps. The Datadog `logs` step has only been run against a stand-in server that mimics the Logs Search API. Expect to adjust small details the first time you use them.

@@ -4,6 +4,7 @@ import type { Application, AuthProfile, RunResult, Scenario, Test, TestType } fr
 import { Field, KV, Notice, Section, Text, useAction } from './widgets'
 import { AuthSelect, blankStep, KindBadge, TestEditor, TYPE_LABEL, TypeBadge } from './TestEditor'
 import { RunView } from './RunView'
+import { History } from './History'
 
 const PLACEHOLDER = /^(step|case)(-\d+)?$/
 
@@ -182,6 +183,11 @@ export function ScenarioEditor({ app, scenarioId, profiles, protos, env, onSaved
           <RunView run={run} />
         </div>
       )}
+      <div className="card">
+        <Section title="History of this scenario on this backend" open={false}>
+          <History app={app.id} scenario={sc.id} envs={Object.keys(app.environments || {})} refresh={run?.id} />
+        </Section>
+      </div>
     </div>
   )
 }

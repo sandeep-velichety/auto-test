@@ -32,6 +32,7 @@ jobs:
           sleep 2
           ./bin/testplane validate --workspace examples/workspace
           ./bin/testplane run --workspace examples/workspace --app orders-demo --junit reports/junit.xml
+          ./bin/testplane run --workspace examples/workspace --app team-flows
       - uses: actions/upload-artifact@v4
         if: always()
         with:

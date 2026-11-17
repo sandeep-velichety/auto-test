@@ -1,0 +1,60 @@
+id: order-to-platform
+name: Order flow across services
+description: Creates an order through the orders service, then checks the platform services, using the orders-demo application's auth profiles and addresses.
+tags: [flow]
+tests:
+  - id: create-order
+    name: Create an order in the orders service
+    type: http
+    auth: orders-demo/orders-oauth          # profile owned by another application
+    http:
+      method: POST
+      url: "{{orders-demo.baseUrl}}/orders"  # that application's environment value
+      body:
+        item: "flow-{{customer}}"
+        quantity: 1
+    expect:
+      status: 201
+    capture:
+      orderId: id
+    variants:
+      - id: stale-token
+        name: Rejected with a stale token
+        auth: orders-demo/expired-token
+        expect:
+          status: 401
+
+  - id: grpc-health
+    name: Platform gRPC service is serving
+    type: grpc
+    auth: none
+    grpc:
+      target: "{{orders-demo.grpcTarget}}"
+      method: grpc.health.v1.Health/Check
+      plaintext: true
+      message:
+        service: orders
+    expect:
+      body:
+        - path: status
+          value: SERVING
+
+  - id: secure-ping
+    name: Secure endpoint accepts the orders client certificate
+    type: http
+    auth: orders-demo/demo-mtls
+    http:
+      method: GET
+      url: "{{orders-demo.secureUrl}}/secure/ping"
+
+  - id: order-still-there
+    name: The order is readable at the end of the flow
+    type: http
+    auth: orders-demo/orders-oauth
+    http:
+      method: GET
+      url: "{{orders-demo.baseUrl}}/orders/{{orderId}}"
+    expect:
+      body:
+        - path: item
+          value: "flow-{{customer}}"

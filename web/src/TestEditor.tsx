@@ -6,7 +6,7 @@ const OPS = ['equals', 'not_equals', 'contains', 'not_contains', 'matches', 'exi
 const GRPC_CODES = ['', 'OK', 'CANCELLED', 'UNKNOWN', 'INVALID_ARGUMENT', 'DEADLINE_EXCEEDED', 'NOT_FOUND', 'ALREADY_EXISTS', 'PERMISSION_DENIED',
   'RESOURCE_EXHAUSTED', 'FAILED_PRECONDITION', 'ABORTED', 'OUT_OF_RANGE', 'UNIMPLEMENTED', 'INTERNAL', 'UNAVAILABLE', 'DATA_LOSS', 'UNAUTHENTICATED']
 
-export const TYPE_LABEL: Record<TestType, string> = { http: 'HTTP call', grpc: 'gRPC call', kafka: 'Kafka', mongo: 'Mongo check', postgres: 'Postgres check' }
+export const TYPE_LABEL: Record<TestType, string> = { http: 'HTTP call', grpc: 'gRPC call', kafka: 'Kafka', mongo: 'Mongo check', postgres: 'Postgres check', logs: 'Service logs' }
 
 export function blankStep(type: TestType): any {
   switch (type) {
@@ -15,6 +15,7 @@ export function blankStep(type: TestType): any {
     case 'kafka': return { brokers: '{{kafkaBrokers}}', topic: '', action: 'consume' }
     case 'mongo': return { uri: '{{mongoUri}}', database: '', collection: '', operation: 'find' }
     case 'postgres': return { dsn: '{{postgresDsn}}', query: '' }
+    case 'logs': return { provider: 'datadog', query: 'service:', apiKey: '{{$env.DD_API_KEY}}', appKey: '{{$env.DD_APP_KEY}}' }
   }
 }
 
@@ -70,6 +71,7 @@ export function ExpectEditor({ type, kind, value, onChange }: { type: TestType; 
     kafka: negative ? 'no matching message arrives' : 'a matching message arrives',
     mongo: negative ? 'no documents are returned' : 'at least one document is returned',
     postgres: negative ? 'no rows are returned' : 'at least one row is returned (or the statement runs)',
+    logs: negative ? 'no matching log entries' : 'at least one matching log entry',
   }
   return (
     <div>
@@ -77,7 +79,7 @@ export function ExpectEditor({ type, kind, value, onChange }: { type: TestType; 
       <div className="grid">
         {type === 'http' && <Field label="Status"><Num value={x.status} onChange={status => set({ status })} placeholder={negative ? 'e.g. 400' : 'e.g. 200'} /></Field>}
         {type === 'grpc' && <Field label="gRPC code"><Select value={x.code || ''} onChange={code => set({ code })} options={GRPC_CODES.map(c => [c, c || '(default)'] as [string, string])} /></Field>}
-        {(type === 'mongo' || type === 'postgres') && <Field label={type === 'mongo' ? 'Document count' : 'Row count'}><Num value={x.count} onChange={count => set({ count })} placeholder="exact count" /></Field>}
+        {(type === 'mongo' || type === 'postgres' || type === 'logs') && <Field label={type === 'mongo' ? 'Document count' : type === 'logs' ? 'Log entry count' : 'Row count'}><Num value={x.count} onChange={count => set({ count })} placeholder="exact count" /></Field>}
         {type === 'kafka' && (
           <Field label="Message">
             <Select value={x.found === undefined ? '' : String(x.found)} onChange={v => set({ found: v === '' ? undefined : v === 'true' })}
@@ -87,7 +89,7 @@ export function ExpectEditor({ type, kind, value, onChange }: { type: TestType; 
         <Field label="Max duration (ms)"><Num value={x.maxDurationMs} onChange={maxDurationMs => set({ maxDurationMs })} /></Field>
         <Field label="Call fails with error containing" hint="For calls that never get a response, such as a refused TLS handshake."><Text value={x.error} onChange={error => set({ error })} /></Field>
       </div>
-      <Field group label="Checks on the result" wide hint={type === 'postgres' ? 'Result is {count, rows:[…]}: use rows.0.column' : type === 'mongo' ? 'Result is {count, documents:[…]}: use documents.0.field' : type === 'kafka' ? 'Result is {key, value, headers, partition, offset}: use value.field' : 'Paths into the JSON response, e.g. data.items.0.id'}>
+      <Field group label="Checks on the result" wide hint={type === 'logs' ? 'Result is {count, logs:[{timestamp, status, service, host, message, attributes}]}: use logs.0.message' : type === 'postgres' ? 'Result is {count, rows:[…]}: use rows.0.column' : type === 'mongo' ? 'Result is {count, documents:[…]}: use documents.0.field' : type === 'kafka' ? 'Result is {key, value, headers, partition, offset}: use value.field' : 'Paths into the JSON response, e.g. data.items.0.id'}>
         <Assertions value={x.body} onChange={body => set({ body })} addLabel="Add check" />
       </Field>
       {type === 'http' && <Field group label="Response headers equal" wide><KV value={x.headers} onChange={headers => set({ headers })} keyLabel="header" /></Field>}
@@ -173,6 +175,23 @@ function StepFields({ type, step, set, protos }: { type: TestType; step: any; se
             : <Field label="Filter (JSON)" wide hint='Extended JSON works: {"_id": {"$oid": "{{orderId}}"}}'><JsonField value={s.filter} onChange={filter => set({ filter })} placeholder='{"orderId": "{{orderId}}"}' /></Field>}
         </>
       )
+    case 'logs':
+      return (
+        <>
+          <p className="hint">Searches Datadog for what the service logged while this scenario ran. Logs take a few seconds to become searchable, so add retry attempts under “Properties and run options”.</p>
+          <div className="grid">
+            <Field label="Provider"><Select value={s.provider || 'datadog'} onChange={provider => set({ provider })} options={[['datadog', 'Datadog']]} /></Field>
+            <Field label="Datadog site" hint="The part after “api.”, e.g. datadoghq.eu or us5.datadoghq.com"><Text mono value={s.site} onChange={site => set({ site })} placeholder="datadoghq.com" /></Field>
+            <Field label="Search from"><Select value={s.from || 'scenario_start'} onChange={from => set({ from: from === 'scenario_start' ? undefined : from })} options={[['scenario_start', 'when the scenario started'], ['now-5m', 'last 5 minutes'], ['now-15m', 'last 15 minutes'], ['now-1h', 'last hour']]} /></Field>
+            <Field label="Max entries"><Num value={s.limit} onChange={limit => set({ limit })} placeholder="50" /></Field>
+          </div>
+          <Field label="Query" wide hint="Datadog log search syntax. Example: service:orders @orderId:{{orderId}} status:error"><Text mono value={s.query} onChange={query => set({ query })} /></Field>
+          <div className="grid">
+            <Field label="API key" hint="Read from the backend’s environment; never typed here."><Text mono value={s.apiKey} onChange={apiKey => set({ apiKey })} placeholder="{{$env.DD_API_KEY}}" /></Field>
+            <Field label="Application key"><Text mono value={s.appKey} onChange={appKey => set({ appKey })} placeholder="{{$env.DD_APP_KEY}}" /></Field>
+          </div>
+        </>
+      )
     case 'postgres':
       return (
         <>
@@ -243,7 +262,7 @@ export function TestEditor({ test, onChange, profiles, inheritedAuth, protos }: 
   const kind = test.kind || 'positive'
   const variants = test.variants || []
   const setType = (type: TestType) => {
-    const next: Test = { ...test, type, http: undefined, grpc: undefined, kafka: undefined, mongo: undefined, postgres: undefined, expect: undefined, variants: undefined }
+    const next: Test = { ...test, type, http: undefined, grpc: undefined, kafka: undefined, mongo: undefined, postgres: undefined, logs: undefined, expect: undefined, variants: undefined }
     ;(next as any)[type] = blankStep(type)
     onChange(next)
   }
