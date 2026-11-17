@@ -4,6 +4,7 @@
 package demo
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -24,9 +25,13 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -213,21 +218,55 @@ func (c *Certs) ServerTLS() (*tls.Config, error) {
 
 // SecureHandler answers on the mTLS listener.
 func SecureHandler() http.Handler {
+	client := func(r *http.Request) string {
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			return r.TLS.PeerCertificates[0].Subject.CommonName
+		}
+		return ""
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /secure/ping", func(w http.ResponseWriter, r *http.Request) {
-		cn := ""
-		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-			cn = r.TLS.PeerCertificates[0].Subject.CommonName
+		send(w, 200, map[string]string{"pong": "true", "client": client(r)})
+	})
+	// Echoes the request headers back, and insists on X-Tenant, so header
+	// handling can be tested.
+	mux.HandleFunc("GET /secure/echo", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Tenant") == "" {
+			send(w, 400, map[string]string{"error": "X-Tenant header is required"})
+			return
 		}
-		send(w, 200, map[string]string{"pong": "true", "client": cn})
+		headers := map[string]string{}
+		for k := range r.Header {
+			headers[k] = r.Header.Get(k)
+		}
+		w.Header().Set("X-Request-Id", r.Header.Get("X-Request-Id"))
+		send(w, 200, map[string]any{"client": client(r), "headers": headers})
 	})
 	return mux
 }
 
-// Run starts all three listeners and blocks. certsDir, when set, receives
-// the client certificate, key and CA for the mTLS endpoint.
-func Run(httpAddr, grpcAddr, mtlsAddr, certsDir string) error {
-	errc := make(chan error, 3)
+// SecureGRPCServer is the health service behind mutual TLS. Unary calls
+// must also carry x-tenant metadata.
+func SecureGRPCServer(cfg *tls.Config) *grpc.Server {
+	needTenant := func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		md, _ := metadata.FromIncomingContext(ctx)
+		if len(md.Get("x-tenant")) == 0 {
+			return nil, status.Error(codes.InvalidArgument, "x-tenant metadata is required")
+		}
+		return handler(ctx, req)
+	}
+	s := grpc.NewServer(grpc.Creds(credentials.NewTLS(cfg)), grpc.UnaryInterceptor(needTenant))
+	h := health.NewServer()
+	h.SetServingStatus("orders", healthpb.HealthCheckResponse_SERVING)
+	healthpb.RegisterHealthServer(s, h)
+	reflection.Register(s)
+	return s
+}
+
+// Run starts the listeners and blocks. Each directory in certsDirs receives
+// the client certificate, key and CA for the mTLS endpoints.
+func Run(httpAddr, grpcAddr, mtlsAddr, grpcTLSAddr string, certsDirs []string) error {
+	errc := make(chan error, 4)
 	go func() { errc <- http.ListenAndServe(httpAddr, Handler()) }()
 	lis, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
@@ -236,24 +275,39 @@ func Run(httpAddr, grpcAddr, mtlsAddr, certsDir string) error {
 	go func() { errc <- GRPCServer().Serve(lis) }()
 	fmt.Printf("demo orders API   http://%s  (token: POST /oauth/token, client %s / %s)\n", display(httpAddr), ClientID, ClientSecret)
 	fmt.Printf("demo gRPC         %s  (plaintext, reflection, grpc.health.v1.Health)\n", display(grpcAddr))
-	if mtlsAddr != "" {
-		certs, err := NewCerts()
-		if err != nil {
+	if mtlsAddr == "" && grpcTLSAddr == "" {
+		return <-errc
+	}
+	certs, err := NewCerts()
+	if err != nil {
+		return err
+	}
+	for _, dir := range certsDirs {
+		if err := certs.WriteClientFiles(dir); err != nil {
 			return err
 		}
+		fmt.Printf("demo client certs written to %s\n", dir)
+	}
+	if mtlsAddr != "" {
 		cfg, err := certs.ServerTLS()
 		if err != nil {
 			return err
 		}
-		if certsDir != "" {
-			if err := certs.WriteClientFiles(certsDir); err != nil {
-				return err
-			}
-			fmt.Printf("demo client certs written to %s\n", certsDir)
-		}
 		srv := &http.Server{Addr: mtlsAddr, Handler: SecureHandler(), TLSConfig: cfg}
 		go func() { errc <- srv.ListenAndServeTLS("", "") }()
-		fmt.Printf("demo mTLS API     https://%s/secure/ping  (client certificate required)\n", display(mtlsAddr))
+		fmt.Printf("demo mTLS API     https://%s/secure/ping and /secure/echo  (client certificate required)\n", display(mtlsAddr))
+	}
+	if grpcTLSAddr != "" {
+		cfg, err := certs.ServerTLS()
+		if err != nil {
+			return err
+		}
+		tl, err := net.Listen("tcp", grpcTLSAddr)
+		if err != nil {
+			return err
+		}
+		go func() { errc <- SecureGRPCServer(cfg).Serve(tl) }()
+		fmt.Printf("demo mTLS gRPC    %s  (client certificate and x-tenant metadata required)\n", display(grpcTLSAddr))
 	}
 	return <-errc
 }

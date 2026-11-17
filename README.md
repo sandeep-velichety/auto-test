@@ -146,7 +146,7 @@ The same list appears next to the auth selector while editing a test, and `testp
 
 **Properties.** Tests and scenarios carry free-form properties (priority, component, owner, requirement id). They show up in results and in the JUnit report.
 
-The full YAML reference, with Kafka, Mongo and Postgres examples, is in [docs/reference.md](docs/reference.md). Building, hosting, access control, CI/CD and operations are covered in [docs/deployment.md](docs/deployment.md).
+The full YAML reference, with Kafka, Mongo and Postgres examples, is in [docs/reference.md](docs/reference.md). Building, hosting, access control, CI/CD and operations are covered in [docs/deployment.md](docs/deployment.md). A worked example of certificates, auth profiles, an HTTP test with headers and a gRPC test over mutual TLS is in [docs/sample-config.md](docs/sample-config.md).
 
 ## Security notes
 

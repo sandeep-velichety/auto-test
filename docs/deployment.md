@@ -52,7 +52,7 @@ Everything is set with command-line flags; there is no config file.
 | `serve` | `--retention-days N` | `0` (keep all) | delete stored runs older than N days |
 | `run` | `--app`, `--env`, `--scenario`, `--tag`, `--kind`, `--var`, `--junit`, `--json`, `--save`, `--publish`, `--by`, `--quiet` | | see the README |
 | `validate` | `--app ID` | all applications | check YAML, auth references and certificate files |
-| `demo` | `--http`, `--grpc`, `--mtls`, `--workspace` | `127.0.0.1:8089/8090/8091` | sample system, for trying the tool only |
+| `demo` | `--http`, `--grpc`, `--mtls`, `--grpc-mtls`, `--workspace` | `127.0.0.1:8089/8090/8091/8092` | sample system, for trying the tool only |
 
 Environment variables the process reads:
 

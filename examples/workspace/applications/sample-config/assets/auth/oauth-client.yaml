@@ -1,0 +1,12 @@
+# OAuth2 client credentials: a token is fetched from tokenUrl once per run
+# and sent as "Authorization: Bearer <token>".
+id: oauth-client
+name: OAuth2 client credentials
+type: oauth2_client_credentials
+oauth2:
+  tokenUrl: "{{baseUrl}}/oauth/token"
+  clientId: demo-client
+  clientSecret: demo-secret   # real setups: "{{$env.ORDERS_CLIENT_SECRET}}"
+  # scopes: [orders.read, orders.write]
+  # audience: orders-api
+  # clientAuth: basic         # send id/secret as HTTP Basic instead of in the form body

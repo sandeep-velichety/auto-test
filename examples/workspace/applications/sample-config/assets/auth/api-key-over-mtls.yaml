@@ -1,0 +1,13 @@
+# Any auth type can also carry TLS settings. This one sends an API key
+# header (gRPC: metadata) and presents the client certificate.
+id: api-key-over-mtls
+name: API key + client certificate
+type: api_key
+apiKey:
+  name: x-api-key
+  value: demo-key           # real setups: "{{$env.ORDERS_API_KEY}}"
+  in: header                # or: query
+tls:
+  cert: demo-client.crt
+  key: demo-client.key
+  ca: demo-ca.crt

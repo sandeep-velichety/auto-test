@@ -1,0 +1,7 @@
+# A fixed bearer token. Not used by the sample scenario; here as a template.
+id: static-token
+name: Static bearer token (template)
+type: bearer
+bearer:
+  token: "{{$env.API_TOKEN}}"
+  # prefix: Bearer          # "none" sends the bare token

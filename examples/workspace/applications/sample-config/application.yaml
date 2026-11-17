@@ -1,0 +1,14 @@
+# Sample configuration: certificates, auth profiles, an HTTP test with
+# headers and a gRPC test with metadata over mutual TLS.
+# Walkthrough: docs/sample-config.md
+id: sample-config
+name: Sample configuration
+description: Reference setup for certificates, auth profiles, HTTP headers and gRPC metadata over mutual TLS. Runs against "testplane demo".
+defaultEnvironment: local
+defaultAuth: client-cert            # used by every test that does not choose its own
+environments:
+  local:
+    baseUrl: http://127.0.0.1:8089          # plain HTTP API with an OAuth2 token endpoint
+    secureUrl: https://localhost:8091       # HTTPS API that demands a client certificate
+    grpcSecureTarget: localhost:8092        # gRPC service that demands a client certificate
+    tenant: acme

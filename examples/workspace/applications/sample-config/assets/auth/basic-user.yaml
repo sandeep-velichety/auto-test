@@ -1,0 +1,8 @@
+# Username and password, sent as an HTTP Basic header. Not used by the
+# sample scenario; here as a template.
+id: basic-user
+name: Basic user (template)
+type: basic
+basic:
+  username: qa-user
+  password: "{{$env.QA_PASSWORD}}"

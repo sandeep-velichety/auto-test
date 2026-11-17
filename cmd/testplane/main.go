@@ -375,11 +375,17 @@ func runDemo(args []string) {
 	httpAddr := fs.String("http", "127.0.0.1:8089", "orders REST API address")
 	grpcAddr := fs.String("grpc", "127.0.0.1:8090", "gRPC address")
 	mtlsAddr := fs.String("mtls", "127.0.0.1:8091", "mTLS HTTPS address (empty to disable)")
-	ws := fs.String("workspace", "", "write demo client certificates into this workspace's orders-demo application")
+	grpcTLSAddr := fs.String("grpc-mtls", "127.0.0.1:8092", "mTLS gRPC address (empty to disable)")
+	ws := fs.String("workspace", "", "write demo client certificates into the example applications of this workspace")
 	_ = fs.Parse(args)
-	certs := ""
+	var certs []string
 	if *ws != "" {
-		certs = store.New(*ws).AssetDir("orders-demo", "certs")
+		st := store.New(*ws)
+		for _, app := range []string{"orders-demo", "sample-config"} {
+			if _, err := st.GetApp(app); err == nil {
+				certs = append(certs, st.AssetDir(app, "certs"))
+			}
+		}
 	}
-	die(demo.Run(*httpAddr, *grpcAddr, *mtlsAddr, certs))
+	die(demo.Run(*httpAddr, *grpcAddr, *mtlsAddr, *grpcTLSAddr, certs))
 }
