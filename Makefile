@@ -1,7 +1,8 @@
-.PHONY: help check build build-go ui test run demo clean
+.PHONY: help check prereqs build build-go ui test run demo clean
 
 help:
 	@echo "make check     verify Go, Node.js and npm are installed and recent enough"
+	@echo "make prereqs   install whatever make check reports missing (asks first; YES=1 to skip the question)"
 	@echo "make build     build the UI, then bin/testplane (needs Go and Node.js)"
 	@echo "make build-go  build bin/testplane with the UI already in web/dist (needs only Go)"
 	@echo "make ui        rebuild the UI into web/dist (needs Node.js)"
@@ -12,6 +13,11 @@ help:
 
 check:
 	@sh scripts/check-prereqs.sh all
+
+# Installs missing Go / Node.js. Uses Homebrew when present, otherwise the
+# official downloads into ~/.local (no sudo). DRY_RUN=1 only shows the plan.
+prereqs:
+	@sh scripts/install-prereqs.sh
 
 build: check ui build-go
 

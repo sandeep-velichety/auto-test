@@ -18,6 +18,14 @@ Two pieces:
 | Docker with Compose | recent | optional: the local Kafka, Mongo and Postgres stack, and the container image | `docker compose version` | https://docs.docker.com/get-docker/ |
 | OpenSSL | any | optional: creating throwaway certificates as in `docs/sample-config.md` | `openssl version` | preinstalled on macOS and Linux |
 
+`make prereqs` installs whatever is missing from the first two rows (Go, Node.js with npm). It shows what it will do and asks before doing it:
+
+- With Homebrew present it runs `brew install go` / `brew install node`.
+- Otherwise, on Linux and macOS, it downloads the official builds from go.dev and nodejs.org, verifies their SHA-256 checksums and unpacks them under `~/.local/opt`, with links in `~/.local/bin`. It needs no sudo and changes nothing system-wide; if `~/.local/bin` is not on your `PATH` it prints the line to add.
+- On Windows it prints the `winget` commands to run.
+
+`YES=1 make prereqs` skips the question (for scripts), and `DRY_RUN=1 make prereqs` only shows the plan. make, Git, Docker and OpenSSL are not installed by it.
+
 `make check` verifies Go, Node.js and npm and says what is missing or too old. `make build`, `make ui`, `make build-go` and `make test` run the same check first and stop with that message instead of failing halfway.
 
 No Node.js? `make build-go` builds the binary with the UI that is already committed in `web/dist`, and needs only Go.
@@ -28,6 +36,7 @@ Network access during the first build: Go modules come from GitHub and npm packa
 
 ```bash
 make check                                              # confirms Go, Node.js and npm are installed
+make prereqs                                            # only if check reported something missing
 make build                                              # builds the UI, then bin/testplane
 ./bin/testplane demo --workspace examples/workspace &   # sample system to test against
 ./bin/testplane serve --workspace examples/workspace    # UI on http://127.0.0.1:8080

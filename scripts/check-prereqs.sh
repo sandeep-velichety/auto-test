@@ -57,6 +57,6 @@ esac
 
 if [ "$fail" -ne 0 ]; then
   echo
-  echo "Some prerequisites are missing. See the Prerequisites section of README.md."
+  echo "Run 'make prereqs' to install them, or see the Prerequisites section of README.md."
   exit 1
 fi

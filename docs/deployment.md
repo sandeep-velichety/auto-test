@@ -20,7 +20,7 @@ A common setup is both: testers author in the UI, the workspace folder is a Git 
 
 ## Build
 
-Requirements: Go 1.24 or newer. Node.js 20 or newer (with npm) only if you rebuild the UI, because the built UI (`web/dist`) is committed. `make check` verifies them and reports anything missing or too old; the full list, including optional tools, is under Prerequisites in the README.
+Requirements: Go 1.24 or newer. Node.js 20 or newer (with npm) only if you rebuild the UI, because the built UI (`web/dist`) is committed. `make check` verifies them and reports anything missing or too old, and `make prereqs` installs what is missing (it asks first); the full list, including optional tools, is under Prerequisites in the README.
 
 ```bash
 make check                                   # verify Go, Node.js and npm
