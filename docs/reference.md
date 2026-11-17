@@ -12,6 +12,8 @@ A workspace has one `global/` folder, shared by every application, and one folde
 | `applications/<app>/scenarios/<id>.yaml` | scenarios |
 | `applications/<app>/assets/protos/<file>` | optional `.proto` files |
 
+Names are unique within their kind: application names, scenario names within an application, test names within a scenario, auth profile names and certificate set names. Saving a second item with a taken name is refused; the API answers `409` with the id of the item that has it (`{"error": "...", "kind": "...", "name": "...", "existing": "<id>"}`). Saving under the same id is an update.
+
 ## global/settings.yaml
 
 ```yaml

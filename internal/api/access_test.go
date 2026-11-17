@@ -167,7 +167,7 @@ func TestSecretsAreWriteOnly(t *testing.T) {
 		t.Fatal("export failed")
 	}
 	other := store.New(t.TempDir())
-	if _, err := other.ImportApp(raw); err != nil {
+	if _, err := other.ImportApp(raw, false); err != nil {
 		t.Fatal(err)
 	}
 	if p, _ := other.GetAuth("basic"); p.Basic.Password != "CHANGE_ME" {
@@ -297,7 +297,7 @@ func TestCertificateSetsOverHTTP(t *testing.T) {
 	}
 	c.do("GET", "/api/apps/shop/export", nil, &raw)
 	other := store.New(t.TempDir())
-	if _, err := other.ImportApp(raw); err != nil {
+	if _, err := other.ImportApp(raw, false); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := other.GetCertSet("client"); err != nil || got.Environments["staging"].Cert != "staging.crt" {

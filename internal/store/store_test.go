@@ -109,7 +109,7 @@ func TestIDsCannotEscapeTheWorkspace(t *testing.T) {
 		}
 	}
 	for _, name := range []string{"../../etc/passwd", "a/b.pem", "", ".."} {
-		if err := s.SaveCert(name, strings.NewReader("x")); !errors.Is(err, ErrInvalid) {
+		if err := s.SaveCert(name, strings.NewReader("x"), false); !errors.Is(err, ErrInvalid) {
 			t.Errorf("certificate file name %q accepted: %v", name, err)
 		}
 		if err := s.SaveProto("shop", name, strings.NewReader("x")); !errors.Is(err, ErrInvalid) {
@@ -212,7 +212,7 @@ func TestExportLeavesPrivateKeysOutAndImportRestores(t *testing.T) {
 	}
 
 	other := New(t.TempDir())
-	id, err := other.ImportApp(data)
+	id, err := other.ImportApp(data, false)
 	if err != nil || id != "shop" {
 		t.Fatalf("import: %q %v", id, err)
 	}
@@ -231,7 +231,7 @@ func TestExportLeavesPrivateKeysOutAndImportRestores(t *testing.T) {
 	// Importing where a global profile of that id exists keeps the existing one.
 	mine := New(t.TempDir())
 	_ = mine.SaveAuth(&model.AuthProfile{ID: "token", Type: model.AuthBearer, Bearer: &model.BearerAuth{Token: "mine"}})
-	if _, err := mine.ImportApp(data); err != nil {
+	if _, err := mine.ImportApp(data, false); err != nil {
 		t.Fatal(err)
 	}
 	if p, _ := mine.GetAuth("token"); p.Bearer.Token != "mine" {
@@ -243,10 +243,10 @@ func TestExportLeavesPrivateKeysOutAndImportRestores(t *testing.T) {
 	f, _ := zw.Create("shop/../../outside.txt")
 	_, _ = f.Write([]byte("x"))
 	_ = zw.Close()
-	if _, err := other.ImportApp(evil.Bytes()); !errors.Is(err, ErrInvalid) {
+	if _, err := other.ImportApp(evil.Bytes(), false); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("zip with a path escape must be refused, got %v", err)
 	}
-	if _, err := other.ImportApp([]byte("not a zip")); !errors.Is(err, ErrInvalid) {
+	if _, err := other.ImportApp([]byte("not a zip"), false); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("garbage must be refused, got %v", err)
 	}
 }

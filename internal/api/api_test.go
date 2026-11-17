@@ -275,3 +275,60 @@ func TestGlobalSettingsUsageAndProtosOverHTTP(t *testing.T) {
 		t.Errorf("delete proto: %d", code)
 	}
 }
+
+// A name that is taken answers 409 and says which item has it, so a client
+// can offer to update that one.
+func TestDuplicateNamesAnswerConflictOverHTTP(t *testing.T) {
+	st := store.New(t.TempDir())
+	srv := httptest.NewServer(New(st, nil).Handler())
+	defer srv.Close()
+	c := client{t, srv.URL}
+	var conflict struct{ Error, Kind, Name, Existing string }
+
+	c.do("PUT", "/api/apps/orders", model.Application{Name: "Orders"}, nil)
+	if code := c.do("PUT", "/api/apps/orders-2", model.Application{Name: "Orders"}, &conflict); code != 409 || conflict.Kind != "application" || conflict.Existing != "orders" {
+		t.Fatalf("second application named Orders: %d %+v", code, conflict)
+	}
+	if code := c.do("PUT", "/api/apps/orders", model.Application{Name: "Orders", Description: "updated"}, nil); code != 200 {
+		t.Fatalf("update: %d", code)
+	}
+
+	sc := model.Scenario{Name: "Checkout", Tests: []model.Test{{ID: "t", Name: "T", Type: "http", HTTP: &model.HTTPStep{URL: "http://x"}}}}
+	c.do("PUT", "/api/apps/orders/scenarios/checkout", sc, nil)
+	if code := c.do("PUT", "/api/apps/orders/scenarios/checkout-2", sc, &conflict); code != 409 || conflict.Kind != "scenario" || conflict.Existing != "checkout" {
+		t.Fatalf("second scenario named Checkout: %d %+v", code, conflict)
+	}
+	sc.Tests = append(sc.Tests, model.Test{ID: "u", Name: "T", Type: "http", HTTP: &model.HTTPStep{URL: "http://x"}})
+	if code := c.do("PUT", "/api/apps/orders/scenarios/checkout", sc, &conflict); code != 400 || !strings.Contains(conflict.Error, "unique within a scenario") {
+		t.Fatalf("two tests named T: %d %+v", code, conflict)
+	}
+
+	key := model.AuthProfile{Name: "Company key", Type: model.AuthHeaders, Headers: map[string]string{"X-Key": "k"}}
+	c.do("PUT", "/api/global/auth/company-key", key, nil)
+	if code := c.do("PUT", "/api/global/auth/company-key-2", key, &conflict); code != 409 || conflict.Existing != "company-key" {
+		t.Fatalf("second auth profile named Company key: %d %+v", code, conflict)
+	}
+	c.do("PUT", "/api/global/tls/client", model.CertSet{Name: "Client", CA: "ca.pem"}, nil)
+	if code := c.do("PUT", "/api/global/tls/client-2", model.CertSet{Name: "Client", CA: "ca.pem"}, &conflict); code != 409 || conflict.Existing != "client" {
+		t.Fatalf("second certificate set named Client: %d %+v", code, conflict)
+	}
+
+	if code := c.do("PUT", "/api/global/certs/ca.pem", "one", nil); code != 204 {
+		t.Fatalf("upload: %d", code)
+	}
+	if code := c.do("PUT", "/api/global/certs/ca.pem", "two", &conflict); code != 409 || conflict.Kind != "certificate file" {
+		t.Fatalf("second upload of ca.pem: %d %+v", code, conflict)
+	}
+	if code := c.do("PUT", "/api/global/certs/ca.pem?replace=true", "two", nil); code != 204 {
+		t.Fatalf("confirmed replacement: %d", code)
+	}
+
+	var zip []byte
+	c.do("GET", "/api/apps/orders/export", nil, &zip)
+	if code := c.do("POST", "/api/import", zip, &conflict); code != 409 || conflict.Existing != "orders" {
+		t.Fatalf("importing an application that exists: %d %+v", code, conflict)
+	}
+	if code := c.do("POST", "/api/import?replace=true", zip, nil); code != 200 {
+		t.Fatalf("importing it as an update: %d", code)
+	}
+}

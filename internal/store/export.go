@@ -171,7 +171,11 @@ func (s *Store) ExportApp(app string, w io.Writer, includeKeys bool) error {
 // overwritten. Zips from before auth became global (assets/auth,
 // assets/tls, assets/certs inside the application) are accepted and their
 // contents moved to global/ the same way.
-func (s *Store) ImportApp(data []byte) (string, error) {
+//
+// An application that already exists is updated only when replace is set.
+// Application names stay unique: a zip whose application has the name of a
+// different application here is refused.
+func (s *Store) ImportApp(data []byte, replace bool) (string, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return "", invalid("not a zip file: %v", err)
@@ -220,6 +224,34 @@ func (s *Store) ImportApp(data []byte) (string, error) {
 	}
 	if app == "" {
 		return "", invalid("zip is empty")
+	}
+	// What is being imported, before anything is written.
+	var incoming model.Application
+	for _, it := range items {
+		if it.rel != "application.yaml" {
+			continue
+		}
+		rc, err := it.f.Open()
+		if err != nil {
+			return "", err
+		}
+		b, err := io.ReadAll(io.LimitReader(rc, 10<<20))
+		rc.Close()
+		if err != nil || yaml.UnmarshalWithOptions(b, &incoming, yaml.Strict()) != nil {
+			return "", invalid("zip has no valid application.yaml")
+		}
+	}
+	if incoming.Name == "" {
+		incoming.Name = app
+	}
+	existing, _ := s.ListApps()
+	for _, o := range existing {
+		if o.ID == app && !replace {
+			return "", &ConflictError{Kind: "application", Name: o.Name, Existing: o.ID, Hint: "import as an update to replace its files with the ones in the zip"}
+		}
+		if o.ID != app && o.Name == incoming.Name {
+			return "", &ConflictError{Kind: "application", Name: o.Name, Existing: o.ID, Hint: "the zip holds a different application (id " + app + ") with the same name; rename one of them first"}
+		}
 	}
 	for _, it := range items {
 		rc, err := it.f.Open()

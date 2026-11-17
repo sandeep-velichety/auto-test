@@ -192,7 +192,8 @@ type ImportResult struct {
 // ExportScenario or a plain scenario file. Auth profiles and certificate
 // sets from a bundle become global ones, created only where none with that
 // id exists, so existing credentials are never overwritten. An existing
-// scenario with the same id is replaced only when overwrite is set.
+// scenario with the same id or the same name is updated only when
+// overwrite is set; one matched by name keeps its id.
 func (s *Store) ImportScenario(app string, data []byte, overwrite bool) (*ImportResult, error) {
 	a, err := s.GetApp(app)
 	if err != nil {
@@ -216,8 +217,17 @@ func (s *Store) ImportScenario(app string, data []byte, overwrite bool) (*Import
 	if errs := sc.Validate(); len(errs) > 0 {
 		return nil, invalid("%s", strings.Join(errs, "; "))
 	}
-	if _, err := s.GetScenario(app, sc.ID); err == nil && !overwrite {
-		return nil, invalid("scenario %q already exists in this application; import with overwrite to replace it", sc.ID)
+	existing := ""
+	if _, err := s.GetScenario(app, sc.ID); err == nil {
+		existing = sc.ID
+	} else if byName := s.scenarioNamed(app, sc.Name); byName != "" {
+		existing = byName
+	}
+	if existing != "" {
+		if !overwrite {
+			return nil, &ConflictError{Kind: "scenario", Name: sc.Name, Existing: existing, Hint: "import with overwrite to update it"}
+		}
+		sc.ID = existing // update the one that is there instead of adding a second
 	}
 	for i := range b.Auth {
 		if errs := b.Auth[i].Validate(); len(errs) > 0 {

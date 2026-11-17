@@ -125,7 +125,7 @@ func TestImportScenarioBundleAndPlainYAML(t *testing.T) {
 	}
 
 	// Importing again needs overwrite; plain scenario YAML works too.
-	if _, err := dst.ImportScenario("orders", raw, false); !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "already exists") {
+	if _, err := dst.ImportScenario("orders", raw, false); !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "already exists") {
 		t.Errorf("second import without overwrite: %v", err)
 	}
 	if _, err := dst.ImportScenario("orders", raw, true); err != nil {

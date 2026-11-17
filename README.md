@@ -159,6 +159,16 @@ To share an application, use "Download as zip" in the UI: the zip holds the appl
 
 **Deleting an application.** "Delete application" is under the application's name at the top of the page (and at the bottom of "Environments & settings"). It asks for confirmation and removes the application's scenarios and run history. Global auth and certificates are not touched.
 
+**Names are unique.** Two applications cannot share a name; nor can two scenarios in one application, two tests in one scenario, two auth profiles or two certificate sets. Names are compared exactly as written. The backend enforces this for the UI, the API and files alike, and `testplane validate` reports duplicates already in a workspace. Instead of making a second one, the UI offers to update the one that exists:
+
+| You do | What happens |
+| --- | --- |
+| Create an application or scenario with a name that exists | asks to open the existing one so you can update it; nothing is created or lost |
+| Save a new auth profile or certificate set with a name that exists | asks to update the existing one with the values you entered |
+| Upload a certificate or key file whose name exists | asks before replacing it (every certificate set naming it uses the new file) |
+| Import a scenario file or application zip that exists | asks before updating it (`--overwrite` on the command line) |
+| Rename something to a name that is taken | refused, with the item that has the name |
+
 **Certificate set.** A named group of files for mutual TLS: client certificate, private key and, for a private CA, the CA bundle. You configure it once, globally. A test of any application then says whether mutual TLS is needed (`mtls: <set>`, or `mtls: none`). As in Postman, a set can also list hosts, and is then presented automatically on any application's calls to those hosts. The editor shows which files are needed and whether each is uploaded, matching and unexpired; `testplane validate` reports the same for every environment.
 
 **Auth profile.** How a test gets its credentials, chosen per test or inherited from the scenario, then the application:

@@ -532,9 +532,18 @@ func (s *Scenario) Validate() []string {
 		add("scenario name is required")
 	}
 	seen := map[string]bool{}
+	names := map[string]int{}
 	for i := range s.Tests {
 		t := &s.Tests[i]
 		where := fmt.Sprintf("test #%d (%s)", i+1, t.ID)
+		// Results are read by name: two tests of one scenario cannot share one.
+		if t.Name != "" {
+			if first, dup := names[t.Name]; dup {
+				add("%s: the name %q is already used by test #%d; test names must be unique within a scenario", where, t.Name, first)
+			} else {
+				names[t.Name] = i + 1
+			}
+		}
 		if !ValidID(t.ID) {
 			add("%s: id must be lowercase letters, digits, '-' or '_'", where)
 		}

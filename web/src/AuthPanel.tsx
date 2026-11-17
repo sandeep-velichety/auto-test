@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
-import { api, slug, uniqueId } from './api'
+import { api, createOrUpdate, isConflict, slug, uniqueId } from './api'
 import type { Application, Asset, AuthCheckResult, AuthProfile, CertSet, TLSSettings, Usage } from './types'
 import { Badge, Check, Field, FileButton, JsonField, KV, Notice, Select, Text, useAction } from './widgets'
 
@@ -103,6 +103,10 @@ function cleanTLS(t: TLSSettings): TLSSettings {
   return out
 }
 
+/** Id and name of the items a new one must not duplicate. */
+type Named = { id: string; name?: string }
+const twinOf = (others: Named[], name: string) => others.find(o => (o.name || o.id) === name)?.id
+
 /** Environments an item can differ in: the global list, plus any it already has values for. */
 function tabsFor(envs: string[], item: { environments?: Record<string, unknown> }): string[] {
   return [...envs, ...Object.keys(item.environments || {}).filter(k => !envs.includes(k))]
@@ -113,8 +117,8 @@ function usedBy(list: string[] | undefined): string {
   return `Used by ${list.length} place${list.length === 1 ? '' : 's'}: ${list.slice(0, 8).join(', ')}${list.length > 8 ? ', …' : ''}.`
 }
 
-function CertSetEditor({ initial, isNew, assets, envs, takenIds, used, onSaved, onDeleted, onUpload }: {
-  initial: CertSet; isNew: boolean; assets: Asset[]; envs: string[]; takenIds: string[]; used?: string[]
+function CertSetEditor({ initial, isNew, assets, envs, others, used, onSaved, onDeleted, onUpload }: {
+  initial: CertSet; isNew: boolean; assets: Asset[]; envs: string[]; others: Named[]; used?: string[]
   onSaved: (c: CertSet) => void; onDeleted: () => void; onUpload: (f: File) => Promise<void>
 }) {
   const [c, setC] = useState<CertSet>(initial)
@@ -134,8 +138,12 @@ function CertSetEditor({ initial, isNew, assets, envs, takenIds, used, onSaved, 
   }
   const save = () => act.run(async () => {
     if (isNew && !slug(c.name)) throw new Error('Give the certificate set a name first.')
-    const id = isNew ? uniqueId(slug(c.name), takenIds) : c.id
-    const saved = await api.saveCertSet({ id, name: c.name, description: c.description, hosts: c.hosts?.length ? c.hosts : undefined, ...cleanTLS(base), environments: c.environments })
+    const write = (id: string) => api.saveCertSet({ id, name: c.name, description: c.description, hosts: c.hosts?.length ? c.hosts : undefined, ...cleanTLS(base), environments: c.environments })
+    // A new set whose name is taken updates that one instead of adding a second.
+    const saved = isNew
+      ? await createOrUpdate('Certificate set', c.name, twinOf(others, c.name), existing => write(existing || uniqueId(slug(c.name), others.map(o => o.id))))
+      : await write(c.id)
+    if (!saved) return
     setC(saved); setDirty(false); onSaved(saved)
   })
   return (
@@ -170,8 +178,8 @@ function CertSetEditor({ initial, isNew, assets, envs, takenIds, used, onSaved, 
   )
 }
 
-function ProfileEditor({ apps, initial, isNew, assets, sets, envs, env, takenIds, used, onSaved, onDeleted, onUpload }: {
-  apps: Application[]; initial: AuthProfile; isNew: boolean; assets: Asset[]; sets: CertSet[]; envs: string[]; env: string; takenIds: string[]; used?: string[]
+function ProfileEditor({ apps, initial, isNew, assets, sets, envs, env, others, used, onSaved, onDeleted, onUpload }: {
+  apps: Application[]; initial: AuthProfile; isNew: boolean; assets: Asset[]; sets: CertSet[]; envs: string[]; env: string; others: Named[]; used?: string[]
   onSaved: (p: AuthProfile) => void; onDeleted: () => void; onUpload: (f: File) => Promise<void>
 }) {
   const [stored, setStored] = useState<AuthProfile>(initial)
@@ -213,7 +221,7 @@ function ProfileEditor({ apps, initial, isNew, assets, sets, envs, env, takenIds
   const certs = assets
   const types: [string, string][] = p.type === 'mtls' ? [...TYPES, ['mtls', 'Mutual TLS only (older style; prefer a certificate set)']] : TYPES
 
-  const body = (): AuthProfile => {
+  const body = (existingId?: string): AuthProfile => {
     const blocks = (src: Record<string, any>, type: string) => {
       const out: Record<string, any> = {}
       if (type === 'basic' && src.basic) out.basic = src.basic
@@ -232,7 +240,7 @@ function ProfileEditor({ apps, initial, isNew, assets, sets, envs, env, takenIds
       if (Object.keys(kept).length) environments[name] = kept
     }
     return {
-      id: isNew ? uniqueId(slug(stored.name), takenIds) : stored.id, name: stored.name, description: stored.description, type: stored.type,
+      id: existingId || (isNew ? uniqueId(slug(stored.name), others.map(o => o.id)) : stored.id), name: stored.name, description: stored.description, type: stored.type,
       ...blocks(stored as any, stored.type), environments: Object.keys(environments).length ? environments : undefined,
     }
   }
@@ -240,7 +248,11 @@ function ProfileEditor({ apps, initial, isNew, assets, sets, envs, env, takenIds
     let ok = false
     await act.run(async () => {
       if (isNew && !slug(stored.name)) throw new Error('Give the profile a name first.')
-      const saved = await api.saveAuth(body())
+      // A new profile whose name is taken updates that one instead of adding a second.
+      const saved = isNew
+        ? await createOrUpdate('Auth profile', stored.name, twinOf(others, stored.name), existing => api.saveAuth(body(existing)))
+        : await api.saveAuth(body())
+      if (!saved) return
       setStored(saved); setDirty(false); onSaved(saved); ok = true
     })
     return ok
@@ -387,8 +399,23 @@ export function AuthPanel({ apps, profiles, sets, assets, envs, env, usage, relo
 }) {
   const [sel, setSel] = useState<Selection>(profiles[0] ? { kind: 'profile', id: profiles[0].id } : sets[0] ? { kind: 'set', id: sets[0].id } : null)
   const act = useAction()
+  // File names are unique: uploading one that exists replaces it only after a yes.
   const upload = async (f: File) => {
-    await act.run(async () => { await api.uploadCert(f.name, await f.arrayBuffer()); await reload() })
+    await act.run(async () => {
+      const data = await f.arrayBuffer()
+      const ask = () => confirm(`A file named “${f.name}” is already uploaded. Replace it? Every certificate set that names it will use the new file.`)
+      if (assets.some(a => a.name === f.name)) {
+        if (!ask()) return
+        await api.uploadCert(f.name, data, true)
+      } else {
+        try { await api.uploadCert(f.name, data) } catch (e) {
+          if (!isConflict(e)) throw e
+          if (!ask()) return
+          await api.uploadCert(f.name, data, true)
+        }
+      }
+      await reload()
+    })
   }
   const profile = sel && sel.kind === 'profile' ? profiles.find(p => p.id === sel.id) : undefined
   const certSet = sel && sel.kind === 'set' ? sets.find(c => c.id === sel.id) : undefined
@@ -440,17 +467,17 @@ export function AuthPanel({ apps, profiles, sets, assets, envs, env, usage, relo
       </div>
 
       <div className="detail">
-        {sel?.kind === 'new-set' && <CertSetEditor key="new-set" isNew initial={{ id: '', name: '' }} assets={assets} envs={envs} takenIds={sets.map(c => c.id)}
+        {sel?.kind === 'new-set' && <CertSetEditor key="new-set" isNew initial={{ id: '', name: '' }} assets={assets} envs={envs} others={sets}
           onUpload={upload} onDeleted={() => setSel(null)} onSaved={async c => { await reload(); setSel({ kind: 'set', id: c.id }) }} />}
         {certSet && (certSet.description?.startsWith('INVALID: ')
           ? <Notice kind="error">global/tls/{certSet.id}.yaml does not parse: {certSet.description.slice(9)}</Notice>
-          : <CertSetEditor key={'set-' + certSet.id} isNew={false} initial={certSet} assets={assets} envs={envs} takenIds={[]} used={usage.certSets[certSet.id]}
+          : <CertSetEditor key={'set-' + certSet.id} isNew={false} initial={certSet} assets={assets} envs={envs} others={[]} used={usage.certSets[certSet.id]}
               onUpload={upload} onSaved={() => reload()} onDeleted={async () => { await reload(); setSel(null) }} />)}
-        {sel?.kind === 'new-profile' && <ProfileEditor key="new-profile" apps={apps} isNew initial={{ id: '', name: '', type: 'oauth2_client_credentials' }} assets={assets} sets={sets} envs={envs} env={env} takenIds={profiles.map(p => p.id)}
+        {sel?.kind === 'new-profile' && <ProfileEditor key="new-profile" apps={apps} isNew initial={{ id: '', name: '', type: 'oauth2_client_credentials' }} assets={assets} sets={sets} envs={envs} env={env} others={profiles}
           onUpload={upload} onDeleted={() => setSel(null)} onSaved={async p => { await reload(); setSel({ kind: 'profile', id: p.id }) }} />}
         {profile && (profile.description?.startsWith('INVALID: ')
           ? <Notice kind="error">global/auth/{profile.id}.yaml does not parse: {profile.description.slice(9)}</Notice>
-          : <ProfileEditor key={'profile-' + profile.id} apps={apps} isNew={false} initial={profile} assets={assets} sets={sets} envs={envs} env={env} takenIds={[]} used={usage.auth[profile.id]}
+          : <ProfileEditor key={'profile-' + profile.id} apps={apps} isNew={false} initial={profile} assets={assets} sets={sets} envs={envs} env={env} others={[]} used={usage.auth[profile.id]}
               onUpload={upload} onSaved={() => reload()} onDeleted={async () => { await reload(); setSel(null) }} />)}
         {!sel && <p className="muted">Select an auth profile or a certificate set, or create one.</p>}
       </div>

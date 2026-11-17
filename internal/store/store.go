@@ -36,6 +36,34 @@ import (
 var ErrNotFound = errors.New("not found")
 var ErrInvalid = errors.New("invalid")
 
+// ErrConflict means the thing being created already exists. The error is
+// a *ConflictError naming what is there, so a caller can offer to update
+// it instead.
+var ErrConflict = errors.New("already exists")
+
+// ConflictError reports a name (or file) that is already taken.
+type ConflictError struct {
+	Kind     string // application, scenario, auth profile, certificate set, certificate file
+	Name     string
+	Existing string // id of what already has the name
+	Hint     string
+}
+
+func (e *ConflictError) Error() string {
+	msg := fmt.Sprintf("%s %q already exists", e.Kind, e.Name)
+	if e.Existing != "" && e.Existing != e.Name {
+		msg += fmt.Sprintf(" (id %s)", e.Existing)
+	}
+	if e.Hint != "" {
+		msg += "; " + e.Hint
+	}
+	return msg
+}
+
+func (e *ConflictError) Is(target error) bool { return target == ErrConflict }
+
+const renameHint = "names must be unique: update the existing one or choose another name"
+
 type Store struct{ Root string }
 
 func New(root string) *Store { return &Store{Root: root} }
@@ -229,6 +257,16 @@ func (s *Store) SaveApp(a *model.Application) error {
 	if a.Name == "" {
 		a.Name = a.ID
 	}
+	// Application names are unique.
+	others, err := s.ListApps()
+	if err != nil {
+		return err
+	}
+	for _, o := range others {
+		if o.ID != a.ID && o.Name == a.Name {
+			return &ConflictError{Kind: "application", Name: a.Name, Existing: o.ID, Hint: renameHint}
+		}
+	}
 	for _, d := range []string{"scenarios", "assets/protos"} {
 		if err := os.MkdirAll(filepath.Join(s.AppDir(a.ID), d), 0o755); err != nil {
 			return err
@@ -306,11 +344,35 @@ func (s *Store) SaveScenario(app string, sc *model.Scenario) error {
 	if errs := sc.Validate(); len(errs) > 0 {
 		return invalid("%s", strings.Join(errs, "; "))
 	}
+	if err := s.scenarioNameFree(app, sc); err != nil {
+		return err
+	}
 	p, err := s.scenarioPath(app, sc.ID)
 	if err != nil {
 		return err
 	}
 	return writeYAML(p, sc)
+}
+
+// scenarioNameFree checks that no other scenario of the application has
+// this scenario's name.
+func (s *Store) scenarioNameFree(app string, sc *model.Scenario) error {
+	if o := s.scenarioNamed(app, sc.Name); o != "" && o != sc.ID {
+		return &ConflictError{Kind: "scenario", Name: sc.Name, Existing: o, Hint: "scenario names must be unique within an application: update the existing one or choose another name"}
+	}
+	return nil
+}
+
+// scenarioNamed returns the id of the application's scenario with that
+// name, or "".
+func (s *Store) scenarioNamed(app, name string) string {
+	ids, _ := listIDs(filepath.Join(s.AppDir(app), "scenarios"), ".yaml")
+	for _, id := range ids {
+		if o, err := s.GetScenario(app, id); err == nil && o.Name == name {
+			return id
+		}
+	}
+	return ""
 }
 
 // SaveScenarioYAML validates raw YAML and stores it as written, so comments
@@ -331,6 +393,9 @@ func (s *Store) SaveScenarioYAML(app, id string, raw []byte) (*model.Scenario, e
 	}
 	if errs := sc.Validate(); len(errs) > 0 {
 		return nil, invalid("%s", strings.Join(errs, "; "))
+	}
+	if err := s.scenarioNameFree(app, &sc); err != nil {
+		return nil, err
 	}
 	p, err := s.scenarioPath(app, id)
 	if err != nil {
@@ -396,6 +461,14 @@ func (s *Store) SaveAuth(a *model.AuthProfile) error {
 	}
 	if a.Name == "" {
 		a.Name = a.ID
+	}
+	// Auth profile names are unique: they are shared by every application.
+	if others, err := s.ListAuth(); err == nil {
+		for _, o := range others {
+			if o.ID != a.ID && o.Name == a.Name {
+				return &ConflictError{Kind: "auth profile", Name: a.Name, Existing: o.ID, Hint: renameHint}
+			}
+		}
 	}
 	p, err := s.authPath(a.ID)
 	if err != nil {
@@ -466,6 +539,14 @@ func (s *Store) SaveCertSet(c *model.CertSet) error {
 	}
 	if c.Name == "" {
 		c.Name = c.ID
+	}
+	// Certificate set names are unique.
+	if others, err := s.ListCertSets(); err == nil {
+		for _, o := range others {
+			if o.ID != c.ID && o.Name == c.Name {
+				return &ConflictError{Kind: "certificate set", Name: c.Name, Existing: o.ID, Hint: renameHint}
+			}
+		}
 	}
 	p, err := s.tlsPath(c.ID)
 	if err != nil {
@@ -622,7 +703,17 @@ func deleteFile(dir, name string) error {
 // ListCerts lists the shared certificate and key files.
 func (s *Store) ListCerts() ([]Asset, error) { return listFiles(s.CertsDir(), "certs") }
 
-func (s *Store) SaveCert(name string, r io.Reader) error { return saveFile(s.CertsDir(), name, r) }
+// SaveCert stores a certificate or key file. A file of that name is
+// replaced only when replace is set, because every certificate set that
+// names it would silently start using the new one.
+func (s *Store) SaveCert(name string, r io.Reader, replace bool) error {
+	if !replace && model.ValidFileName(name) {
+		if _, err := os.Stat(filepath.Join(s.CertsDir(), name)); err == nil {
+			return &ConflictError{Kind: "certificate file", Name: name, Hint: "upload it again as a replacement, or use another file name"}
+		}
+	}
+	return saveFile(s.CertsDir(), name, r)
+}
 
 func (s *Store) DeleteCert(name string) error { return deleteFile(s.CertsDir(), name) }
 

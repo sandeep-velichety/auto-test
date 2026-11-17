@@ -74,6 +74,16 @@ func fail(w http.ResponseWriter, err error) {
 		code = http.StatusNotFound
 	case errors.Is(err, store.ErrInvalid):
 		code = http.StatusBadRequest
+	case errors.Is(err, store.ErrConflict):
+		// 409: it already exists. "existing" names it so the caller can
+		// offer to update that one instead.
+		body := map[string]string{"error": err.Error()}
+		var c *store.ConflictError
+		if errors.As(err, &c) {
+			body["kind"], body["name"], body["existing"] = c.Kind, c.Name, c.Existing
+		}
+		writeJSON(w, http.StatusConflict, body)
+		return
 	}
 	writeJSON(w, code, map[string]string{"error": err.Error()})
 }
@@ -206,7 +216,7 @@ func (s *Server) Handler() http.Handler {
 			fail(w, err)
 			return
 		}
-		id, err := st.ImportApp(b)
+		id, err := st.ImportApp(b, r.URL.Query().Get("replace") == "true")
 		if err != nil {
 			fail(w, err)
 			return
@@ -473,7 +483,8 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, 200, list)
 	})
 	mux.HandleFunc("PUT /api/global/certs/{name}", func(w http.ResponseWriter, r *http.Request) {
-		if err := st.SaveCert(r.PathValue("name"), r.Body); err != nil {
+		// ?replace=true confirms that an existing file of that name is to be replaced.
+		if err := st.SaveCert(r.PathValue("name"), r.Body, r.URL.Query().Get("replace") == "true"); err != nil {
 			fail(w, err)
 			return
 		}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, connections, slug, uniqueId } from './api'
+import { api, connections, isConflict, slug, uniqueId } from './api'
 import { Backends } from './Backends'
 import { History } from './History'
 import type { Application, Asset, AuthProfile, CertSet, Global, RunResult, Scenario, Usage } from './types'
@@ -122,18 +122,35 @@ export default function App() {
   useEffect(() => { if (envReady) top.run(() => loadGlobal(env)) }, [env, envReady]) // eslint-disable-line
   const reloadGlobal = () => loadGlobal(env)
 
+  // Names are unique. Creating one that exists opens the existing one to
+  // update it; nothing is created and nothing in it is lost.
+  const openExisting = (kind: string, name: string) => confirm(`${kind} “${name}” already exists. Open it to update it? A second one will not be created.`)
   const createApp = () => top.run(async () => {
-    const id = uniqueId(slug(newApp), (apps || []).map(a => a.id))
-    if (!slug(newApp)) throw new Error('Give the application a name.')
+    const name = newApp.trim()
+    if (!slug(name)) throw new Error('Give the application a name.')
+    const open = (id: string) => { if (openExisting('Application', name)) { setNewApp(''); go({ app: id, tab: 'settings' }) } }
+    const twin = (apps || []).find(a => a.name === name)
+    if (twin) return open(twin.id)
+    const id = uniqueId(slug(name), (apps || []).map(a => a.id))
     // Environments, auth and certificates are global: a new application only needs its own addresses.
-    await api.saveApp({ id, name: newApp.trim() })
+    try { await api.saveApp({ id, name }) } catch (e) {
+      if (!isConflict(e) || !e.existing) throw e
+      await loadApps(); return open(e.existing) // someone else created it meanwhile
+    }
     setNewApp(''); await loadApps(); go({ app: id, tab: 'settings' })
   })
   const createScenario = () => top.run(async () => {
     if (!app) return
-    if (!slug(newScenario)) throw new Error('Give the scenario a name.')
-    const id = uniqueId(slug(newScenario), scenarios.map(s => s.id))
-    await api.saveScenario(app.id, { id, name: newScenario.trim(), tests: [] })
+    const name = newScenario.trim()
+    if (!slug(name)) throw new Error('Give the scenario a name.')
+    const open = (id: string) => { if (openExisting('Scenario', name)) { setNewScenario(''); go({ app: app.id, tab: 'scenarios', item: id }) } }
+    const twin = scenarios.find(s => s.name === name)
+    if (twin) return open(twin.id)
+    const id = uniqueId(slug(name), scenarios.map(s => s.id))
+    try { await api.saveScenario(app.id, { id, name, tests: [] }) } catch (e) {
+      if (!isConflict(e) || !e.existing) throw e
+      await loadAppData(); return open(e.existing)
+    }
     setNewScenario(''); await loadAppData(); go({ app: app.id, tab: 'scenarios', item: id })
   })
   const runAll = () => runAct.run(async () => {
@@ -145,15 +162,27 @@ export default function App() {
     if (!app) return
     const text = await f.text()
     let res
-    try { res = await api.importScenario(app.id, text) } catch (e: any) {
-      if (!/already exists/.test(e?.message || '') || !confirm('A scenario with that id already exists here. Replace it?')) throw e
+    try { res = await api.importScenario(app.id, text) } catch (e) {
+      if (!isConflict(e)) throw e
+      const have = scenarios.find(s => s.id === e.existing)
+      if (!confirm(`Scenario “${have?.name || e.existing}” already exists in this application. Update it with the file? Its current tests will be replaced.`)) return
       res = await api.importScenario(app.id, text, true)
     }
     await Promise.all([loadAppData(), reloadGlobal()])
     setNotice(`Imported “${res.scenario}”.` + (res.created.length ? ` Created under Global: ${res.created.join(', ')}.` : '') + (res.kept.length ? ` Kept the existing global: ${res.kept.join(', ')}.` : '') + (res.missing?.length ? ` Still needed here: ${res.missing.join(', ')}.` : ''))
     go({ app: app.id, tab: 'scenarios', item: res.scenario })
   })
-  const importZip = (f: File) => top.run(async () => { const r = await api.importApp(await f.arrayBuffer()); await Promise.all([loadApps(), reloadGlobal()]); go({ app: r.id, tab: 'scenarios' }) })
+  const importZip = (f: File) => top.run(async () => {
+    const zip = await f.arrayBuffer()
+    let r
+    try { r = await api.importApp(zip) } catch (e) {
+      if (!isConflict(e)) throw e
+      const have = (apps || []).find(a => a.id === e.existing)
+      if (!confirm(`Application “${have?.name || e.existing}” already exists. Update it with the zip? Its settings and the scenarios in the zip will be replaced; global auth and certificates that already exist are kept.`)) return
+      r = await api.importApp(zip, true)
+    }
+    await Promise.all([loadApps(), reloadGlobal()]); go({ app: r.id, tab: 'scenarios' })
+  })
 
   // With regions, a target is "environment/region": offer two pickers.
   const paired = (global?.regions || []).length > 0

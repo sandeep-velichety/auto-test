@@ -48,7 +48,29 @@ function headers(b: Backend, extra?: Record<string, string>): Record<string, str
 }
 
 export class ApiError extends Error {
+  /** For 409 (already exists): the id of the item that has the name. */
+  existing?: string
   constructor(message: string, public status: number) { super(message) }
+}
+
+/** True when the backend refused something because it already exists. */
+export const isConflict = (e: unknown): e is ApiError => e instanceof ApiError && e.status === 409
+
+/**
+ * Creates something that has a full form (an auth profile, a certificate
+ * set). If one with that name already exists, asks whether to update it
+ * with the values entered instead of making a second one.
+ * knownId is the existing item's id when the caller already sees it in its
+ * list; the backend's own check covers lists that are out of date.
+ * Returns undefined when the person declines.
+ */
+export async function createOrUpdate<T>(kind: string, name: string, knownId: string | undefined, save: (existingId?: string) => Promise<T>): Promise<T | undefined> {
+  const ask = () => confirm(`${kind} “${name}” already exists. Update it with these values instead of creating a second one? Its current settings will be replaced.`)
+  if (knownId) return ask() ? save(knownId) : undefined
+  try { return await save() } catch (e) {
+    if (!isConflict(e) || !e.existing) throw e
+    return ask() ? save(e.existing) : undefined
+  }
 }
 
 async function send(b: Backend, method: string, path: string, body?: unknown): Promise<Response> {
@@ -63,9 +85,12 @@ async function send(b: Backend, method: string, path: string, body?: unknown): P
   }
   if (!res.ok) {
     let msg = `${res.status} ${res.statusText}`
-    try { msg = (await res.json()).error || msg } catch { /* not JSON */ }
+    let existing: string | undefined
+    try { const body = await res.json(); msg = body.error || msg; existing = body.existing || undefined } catch { /* not JSON */ }
     if (res.status === 401) msg = `${b.name} needs its access token. Open “Backends” and enter it.`
-    throw new ApiError(msg, res.status)
+    const err = new ApiError(msg, res.status)
+    err.existing = existing
+    throw err
   }
   return res
 }
@@ -90,7 +115,8 @@ export const api = {
   apps: () => call<Application[]>('GET', '/apps'),
   saveApp: (a: Application) => call<Application>('PUT', `/apps/${e(a.id)}`, a),
   deleteApp: (id: string) => call<void>('DELETE', `/apps/${e(id)}`),
-  importApp: (zip: ArrayBuffer) => call<{ id: string }>('POST', '/import', zip),
+  /** replace: update the application if it already exists. */
+  importApp: (zip: ArrayBuffer, replace = false) => call<{ id: string }>('POST', `/import?replace=${replace}`, zip),
   exportApp: async (id: string) => (await send(current, 'GET', `/apps/${e(id)}/export`)).blob(),
 
   scenarios: (app: string) => call<Scenario[]>('GET', `/apps/${e(app)}/scenarios`),
@@ -117,7 +143,8 @@ export const api = {
   saveCertSet: (c: CertSet) => call<CertSet>('PUT', `/global/tls/${e(c.id)}`, c),
   deleteCertSet: (id: string) => call<void>('DELETE', `/global/tls/${e(id)}`),
   certs: () => call<Asset[]>('GET', '/global/certs'),
-  uploadCert: (name: string, data: ArrayBuffer) => call<void>('PUT', `/global/certs/${e(name)}`, data),
+  /** replace: overwrite a file of that name; without it an existing file is refused (409). */
+  uploadCert: (name: string, data: ArrayBuffer, replace = false) => call<void>('PUT', `/global/certs/${e(name)}?replace=${replace}`, data),
   deleteCert: (name: string) => call<void>('DELETE', `/global/certs/${e(name)}`),
 
   // An application's own .proto files.
@@ -141,6 +168,12 @@ export function uniqueId(base: string, taken: string[]): string {
   const b = base || 'item'
   if (!taken.includes(b)) return b
   for (let i = 2; ; i++) if (!taken.includes(`${b}-${i}`)) return `${b}-${i}`
+}
+
+/** base, or "base (2)", "base (3)", ...: the first name not taken. */
+export function uniqueName(base: string, taken: string[]): string {
+  if (!taken.includes(base)) return base
+  for (let i = 2; ; i++) if (!taken.includes(`${base} (${i})`)) return `${base} (${i})`
 }
 
 export function when(iso: string): string {

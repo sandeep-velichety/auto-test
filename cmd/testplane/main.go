@@ -332,6 +332,23 @@ func validate(args []string) int {
 		fmt.Printf("  PROBLEM %s: %s\n", where, msg)
 	}
 
+	// Names are unique within their kind, so people can tell things apart.
+	type named struct{ id, name string }
+	duplicates := func(where, kind string, list []named) {
+		first := map[string]string{}
+		for _, n := range list {
+			if other, ok := first[n.name]; ok {
+				report(where+n.id, fmt.Sprintf("%s name %q is also used by %s; names must be unique", kind, n.name, other))
+				continue
+			}
+			first[n.name] = n.id
+		}
+	}
+	var appNames []named
+	for _, a := range apps {
+		appNames = append(appNames, named{a.ID, a.Name})
+	}
+
 	// Global: the environment list, auth profiles and certificate sets,
 	// checked for every environment.
 	fmt.Println("global")
@@ -349,8 +366,10 @@ func validate(args []string) int {
 		die(err)
 	}
 	known := map[string]bool{model.AuthNone: true}
+	var authNames, setNames []named
 	for _, p := range profiles {
 		known[p.ID] = true
+		authNames = append(authNames, named{p.ID, p.Name})
 		where := "auth/" + p.ID
 		if strings.HasPrefix(p.Description, "INVALID: ") {
 			report(where, strings.TrimPrefix(p.Description, "INVALID: "))
@@ -384,6 +403,7 @@ func validate(args []string) int {
 	knownSets := map[string]bool{model.AuthNone: true}
 	for _, c := range sets {
 		knownSets[c.ID] = true
+		setNames = append(setNames, named{c.ID, c.Name})
 		where := "tls/" + c.ID
 		if strings.HasPrefix(c.Description, "INVALID: ") {
 			report(where, strings.TrimPrefix(c.Description, "INVALID: "))
@@ -406,6 +426,9 @@ func validate(args []string) int {
 			}
 		}
 	}
+	duplicates("auth/", "auth profile", authNames)
+	duplicates("tls/", "certificate set", setNames)
+	duplicates("applications/", "application", appNames)
 	fmt.Printf("  %d environment(s)%s, %d auth profile(s), %d certificate set(s)\n", len(g.Environments), regionCount(g), len(profiles), len(sets))
 
 	for _, a := range apps {
@@ -430,6 +453,11 @@ func validate(args []string) int {
 			die(err)
 		}
 		tests := 0
+		var scNames []named
+		for _, sc := range scs {
+			scNames = append(scNames, named{sc.ID, sc.Name})
+		}
+		duplicates("scenarios/", "scenario", scNames)
 		for _, sc := range scs {
 			where := "scenarios/" + sc.ID
 			if strings.HasPrefix(sc.Description, "INVALID: ") {
@@ -549,7 +577,7 @@ func importCmd(args []string) int {
 	fs := flag.NewFlagSet("import", flag.ExitOnError)
 	ws := workspaceFlag(fs)
 	app := fs.String("app", "", "application to import a scenario into (not needed for an application zip)")
-	overwrite := fs.Bool("overwrite", false, "replace a scenario that already exists")
+	overwrite := fs.Bool("overwrite", false, "update the scenario or application if it already exists")
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "error: give exactly one file to import")
@@ -562,9 +590,12 @@ func importCmd(args []string) int {
 	}
 	st := openStore(*ws)
 	if bytes.HasPrefix(data, []byte("PK")) {
-		id, err := st.ImportApp(data)
+		id, err := st.ImportApp(data, *overwrite)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
+			if errors.Is(err, store.ErrConflict) && !*overwrite {
+				fmt.Fprintln(os.Stderr, "       add --overwrite to update the existing one")
+			}
 			return 2
 		}
 		fmt.Println("imported application", id)
@@ -577,6 +608,9 @@ func importCmd(args []string) int {
 	res, err := st.ImportScenario(*app, data, *overwrite)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
+		if errors.Is(err, store.ErrConflict) && !*overwrite {
+			fmt.Fprintln(os.Stderr, "       add --overwrite to update the existing one")
+		}
 		return 2
 	}
 	fmt.Printf("imported scenario %s into %s\n", res.Scenario, *app)

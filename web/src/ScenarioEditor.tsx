@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, download, parseCurl, slug, uniqueId } from './api'
+import { api, download, parseCurl, slug, uniqueId, uniqueName } from './api'
 import type { Application, AuthProfile, CertSet, RunResult, Scenario, Test, TestType } from './types'
 import { Field, KV, Notice, Section, StatusBadge, Text, useAction } from './widgets'
 import { AuthSelect, blankStep, KindBadge, MtlsSelect, TestEditor, TYPE_LABEL, TypeBadge } from './TestEditor'
@@ -72,7 +72,7 @@ export function ScenarioEditor({ app, scenarioId, profiles, sets, protos, env, e
   const duplicate = (i: number) => {
     const src = sc.tests[i]
     const copy: Test = JSON.parse(JSON.stringify(src))
-    copy.id = uniqueId(src.id + '-copy', sc.tests.map(t => t.id)); copy.name = src.name + ' (copy)'
+    copy.id = uniqueId(src.id + '-copy', sc.tests.map(t => t.id)); copy.name = uniqueName(src.name + ' (copy)', sc.tests.map(t => t.name))
     const tests = [...sc.tests]; tests.splice(i + 1, 0, copy)
     change({ tests }); setOpen(copy.id)
   }
@@ -86,6 +86,12 @@ export function ScenarioEditor({ app, scenarioId, profiles, sets, protos, env, e
       } else {
         const unnamed = sc.tests.findIndex(t => !t.name.trim())
         if (unnamed >= 0) { setOpen(sc.tests[unnamed].id); throw new Error(`Step ${unnamed + 1} needs a name.`) }
+        // Step names are unique within a scenario: results are read by name.
+        const twin = sc.tests.findIndex((t, i) => sc.tests.findIndex(o => o.name === t.name) !== i)
+        if (twin >= 0) {
+          setOpen(sc.tests[twin].id)
+          throw new Error(`Step ${twin + 1} has the same name as step ${sc.tests.findIndex(o => o.name === sc.tests[twin].name) + 1} (“${sc.tests[twin].name}”). Give each step its own name.`)
+        }
         const next = withIds(sc)
         const s = await api.saveScenario(app.id, next)
         setSc({ ...s, tests: s.tests || [] }); onSaved(s)
@@ -108,6 +114,7 @@ export function ScenarioEditor({ app, scenarioId, profiles, sets, protos, env, e
     const id = uniqueId('step', sc.tests.map(t => t.id))
     let name = parsed.method + ' ' + parsed.url
     try { name = parsed.method + ' ' + new URL(parsed.url).pathname } catch { /* keep the raw url */ }
+    name = uniqueName(name, sc.tests.map(t => t.name))
     change({ tests: [...sc.tests, { id, name, type: 'http', http: parsed }] }); setOpen(id); setCurl(null); act.setError('')
   }
   const lastStatus = (id: string) => run?.scenarios[0]?.tests?.find(t => t.id === id)?.status
