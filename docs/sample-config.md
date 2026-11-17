@@ -27,7 +27,7 @@ applications/sample-config/
     headers-and-mtls.yaml             HTTP with headers, three kinds of token, gRPC with metadata
 ```
 
-Run it:
+Run it (build first with `make build`; `make check` confirms the prerequisites):
 
 ```bash
 ./bin/testplane demo --workspace examples/workspace &     # also writes the three demo-* certificate files

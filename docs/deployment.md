@@ -20,11 +20,13 @@ A common setup is both: testers author in the UI, the workspace folder is a Git 
 
 ## Build
 
-Requirements: Go 1.24 or newer. Node 20 or newer only if you change the UI, because the built UI (`web/dist`) is committed.
+Requirements: Go 1.24 or newer. Node.js 20 or newer (with npm) only if you rebuild the UI, because the built UI (`web/dist`) is committed. `make check` verifies them and reports anything missing or too old; the full list, including optional tools, is under Prerequisites in the README.
 
 ```bash
+make check                                   # verify Go, Node.js and npm
 make build                                   # UI + binary -> bin/testplane
-# or, without rebuilding the UI:
+make build-go                                # binary only, with the committed UI (needs only Go)
+# or by hand:
 CGO_ENABLED=0 go build -o bin/testplane ./cmd/testplane
 ```
 

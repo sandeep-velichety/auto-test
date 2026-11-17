@@ -7,11 +7,27 @@ Two pieces:
 - **Backend** (Go, one binary): runs the tests. It works on its own from a terminal or a CI/CD pipeline and also serves a REST API.
 - **Front end** (React): create applications, auth profiles and scenarios, run them and read the results. It is embedded in the binary.
 
+## Prerequisites
+
+| Tool | Version | Needed for | Check | Get it |
+| --- | --- | --- | --- | --- |
+| Go | 1.24 or newer | building and running the tests (always) | `go version` | https://go.dev/dl/ |
+| Node.js and npm | Node 20 or newer | rebuilding the UI (`make build`, `make ui`) | `node -v`, `npm -v` | https://nodejs.org/ |
+| make | any | the shortcuts below; every target is a plain command you can also run by hand | `make -v` | preinstalled on macOS and Linux; on Windows use WSL or Git Bash |
+| Git | any | cloning the repository | `git --version` | https://git-scm.com/ |
+| Docker with Compose | recent | optional: the local Kafka, Mongo and Postgres stack, and the container image | `docker compose version` | https://docs.docker.com/get-docker/ |
+| OpenSSL | any | optional: creating throwaway certificates as in `docs/sample-config.md` | `openssl version` | preinstalled on macOS and Linux |
+
+`make check` verifies Go, Node.js and npm and says what is missing or too old. `make build`, `make ui`, `make build-go` and `make test` run the same check first and stop with that message instead of failing halfway.
+
+No Node.js? `make build-go` builds the binary with the UI that is already committed in `web/dist`, and needs only Go.
+
+Network access during the first build: Go modules come from GitHub and npm packages from the npm registry.
+
 ## Quick start
 
-Needs Go 1.24+ and Node 20+.
-
 ```bash
+make check                                              # confirms Go, Node.js and npm are installed
 make build                                              # builds the UI, then bin/testplane
 ./bin/testplane demo --workspace examples/workspace &   # sample system to test against
 ./bin/testplane serve --workspace examples/workspace    # UI on http://127.0.0.1:8080
