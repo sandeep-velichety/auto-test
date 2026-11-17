@@ -1,0 +1,108 @@
+id: data-checks
+name: Data checks
+description: A row in Postgres, a seeded document in Mongo and an event on Kafka. Start the stack first with "docker compose -f examples/docker-compose.yml up -d".
+tags: [data]
+variables:
+  ref: "ref-{{$randomInt}}"
+tests:
+  - id: pg-create-table
+    name: Create the working table
+    type: postgres
+    postgres:
+      dsn: "{{postgresDsn}}"
+      query: CREATE TABLE IF NOT EXISTS tp_orders (ref text PRIMARY KEY, status text)
+
+  - id: pg-insert
+    name: Insert an order row
+    type: postgres
+    postgres:
+      dsn: "{{postgresDsn}}"
+      query: INSERT INTO tp_orders (ref, status) VALUES ($1, 'created')
+      args: ["{{ref}}"]
+
+  - id: pg-row-exists
+    name: The order row can be read back
+    type: postgres
+    postgres:
+      dsn: "{{postgresDsn}}"
+      query: SELECT ref, status FROM tp_orders WHERE ref = $1
+      args: ["{{ref}}"]
+    expect:
+      count: 1
+      body:
+        - path: rows.0.status
+          value: created
+    capture:
+      status: rows.0.status
+    variants:
+      - id: unknown-ref
+        name: An unknown reference returns no rows
+        postgres:
+          args: ["no-such-ref"]
+
+  - id: mongo-document-exists
+    name: The seeded order document exists
+    type: mongo
+    mongo:
+      uri: "{{mongoUri}}"
+      database: shop
+      collection: orders
+      filter:
+        orderId: A1
+    expect:
+      count: 1
+      body:
+        - path: documents.0.status
+          value: created
+    variants:
+      - id: unknown-order
+        name: An unknown order id returns no documents
+        mongo:
+          filter:
+            orderId: nope
+
+  - id: kafka-publish
+    name: Publish an OrderCreated event
+    type: kafka
+    kafka:
+      brokers: "{{kafkaBrokers}}"
+      topic: orders.events
+      action: produce
+      key: "{{ref}}"
+      value:
+        ref: "{{ref}}"
+        type: OrderCreated
+        status: "{{status}}"
+
+  - id: kafka-event-arrives
+    name: The event can be consumed
+    type: kafka
+    kafka:
+      brokers: "{{kafkaBrokers}}"
+      topic: orders.events
+      timeoutMs: 10000
+      match:
+        - path: value.ref
+          value: "{{ref}}"
+    expect:
+      body:
+        - path: value.type
+          value: OrderCreated
+        - path: key
+          value: "{{ref}}"
+    variants:
+      - id: no-event-for-other-ref
+        name: No event exists for another reference
+        kafka:
+          timeoutMs: 3000
+          match:
+            - path: value.ref
+              value: no-such-ref
+
+  - id: pg-cleanup
+    name: Remove the order row
+    type: postgres
+    postgres:
+      dsn: "{{postgresDsn}}"
+      query: DELETE FROM tp_orders WHERE ref = $1
+      args: ["{{ref}}"]

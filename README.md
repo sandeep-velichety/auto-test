@@ -102,7 +102,7 @@ The same list appears next to the auth selector while editing a test, and `testp
 
 **Properties.** Tests and scenarios carry free-form properties (priority, component, owner, requirement id). They show up in results and in the JUnit report.
 
-The full YAML reference, with Kafka, Mongo and Postgres examples, is in [docs/reference.md](docs/reference.md).
+The full YAML reference, with Kafka, Mongo and Postgres examples, is in [docs/reference.md](docs/reference.md). Building, hosting, access control, CI/CD and operations are covered in [docs/deployment.md](docs/deployment.md).
 
 ## Security notes
 
@@ -119,6 +119,13 @@ cd web && npm run dev             # UI with hot reload, proxies /api to :8080
 ```
 
 `web/dist` is committed so `go build ./cmd/testplane` works without Node; `make ui` refreshes it.
+
+### Trying Kafka, Mongo and Postgres locally
+
+```bash
+docker compose -f examples/docker-compose.yml up -d
+./bin/testplane run --workspace examples/workspace --app data-demo
+```
 
 ### What has and has not been exercised
 

@@ -1,0 +1,35 @@
+# Local servers for the data-demo example application.
+#   docker compose -f examples/docker-compose.yml up -d
+#   ./bin/testplane run --workspace examples/workspace --app data-demo
+#   docker compose -f examples/docker-compose.yml down -v
+services:
+  kafka:
+    image: apache/kafka:3.8.0
+    ports: ["9092:9092"]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
+  # The broker advertises localhost:9092, so the one-shot topic creation
+  # shares the broker's network namespace.
+  kafka-init:
+    image: apache/kafka:3.8.0
+    network_mode: "service:kafka"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--create", "--if-not-exists", "--topic", "orders.events"]
+
+  mongo:
+    image: mongo:7
+    ports: ["27017:27017"]
+    volumes:
+      - ./stack/mongo-seed.js:/docker-entrypoint-initdb.d/seed.js:ro
+
+  postgres:
+    image: postgres:16
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_PASSWORD: postgres

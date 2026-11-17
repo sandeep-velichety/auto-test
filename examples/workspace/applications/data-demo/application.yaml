@@ -1,0 +1,9 @@
+id: data-demo
+name: Data checks demo
+description: Kafka, Mongo and Postgres steps against the local stack in examples/docker-compose.yml.
+defaultEnvironment: local
+environments:
+  local:
+    kafkaBrokers: localhost:9092
+    mongoUri: mongodb://localhost:27017
+    postgresDsn: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
