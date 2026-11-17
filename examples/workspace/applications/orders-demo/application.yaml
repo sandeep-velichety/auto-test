@@ -1,0 +1,10 @@
+id: orders-demo
+name: Orders demo
+description: Sample application that targets the built-in demo system (testplane demo).
+defaultEnvironment: local
+defaultAuth: orders-oauth
+environments:
+  local:
+    baseUrl: http://127.0.0.1:8089
+    grpcTarget: 127.0.0.1:8090
+    secureUrl: https://localhost:8091

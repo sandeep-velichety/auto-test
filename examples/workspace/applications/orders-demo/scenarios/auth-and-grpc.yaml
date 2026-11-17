@@ -1,0 +1,69 @@
+id: auth-and-grpc
+name: Token endpoint, gRPC and mTLS
+description: Shows auth selection per test, a gRPC call through server reflection and a mutual-TLS call.
+tags: [smoke, platform]
+auth: none
+tests:
+  - id: health
+    name: Service is up
+    type: http
+    http:
+      method: GET
+      url: "{{baseUrl}}/health"
+    expect:
+      body:
+        - path: status
+          value: up
+
+  - id: bad-client-secret
+    name: Token endpoint rejects a wrong client secret
+    type: http
+    kind: negative
+    auth: wrong-secret
+    http:
+      method: GET
+      url: "{{baseUrl}}/orders/1"
+    expect:
+      error: answered 401
+
+  - id: grpc-health
+    name: gRPC health check
+    type: grpc
+    grpc:
+      target: "{{grpcTarget}}"
+      method: grpc.health.v1.Health/Check
+      plaintext: true
+      message:
+        service: orders
+    expect:
+      code: OK
+      body:
+        - path: status
+          value: SERVING
+    variants:
+      - id: unknown-service
+        name: Unknown service is NOT_FOUND
+        grpc:
+          message:
+            service: no-such-service
+        expect:
+          code: NOT_FOUND
+
+  - id: mtls-ping
+    name: Mutual TLS call with the client certificate
+    type: http
+    auth: demo-mtls
+    http:
+      method: GET
+      url: "{{secureUrl}}/secure/ping"
+    expect:
+      status: 200
+      body:
+        - path: client
+          value: testplane-demo-client
+    variants:
+      - id: no-client-cert
+        name: Handshake is refused without a client certificate
+        auth: demo-ca-only
+        expect:
+          error: certificate

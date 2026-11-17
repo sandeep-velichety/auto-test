@@ -1,0 +1,8 @@
+id: demo-mtls
+name: Demo client certificate
+description: Files are written by "testplane demo --workspace <dir>".
+type: mtls
+tls:
+  cert: demo-client.crt
+  key: demo-client.key
+  ca: demo-ca.crt

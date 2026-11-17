@@ -1,0 +1,5 @@
+id: demo-ca-only
+name: Trusts the demo CA, presents no client certificate
+type: none
+tls:
+  ca: demo-ca.crt

@@ -1,0 +1,101 @@
+id: order-lifecycle
+name: Order lifecycle
+description: Create an order, read it back, delete it. Steps run top to bottom and later steps use values captured by earlier ones.
+tags: [smoke, orders]
+properties:
+  component: orders
+  owner: qa-team
+variables:
+  item: "widget-{{$randomInt}}"
+tests:
+  - id: create-order
+    name: Create an order
+    type: http
+    kind: positive
+    properties:
+      priority: high
+    http:
+      method: POST
+      url: "{{baseUrl}}/orders"
+      headers:
+        X-Request-Id: "{{$uuid}}"
+      body:
+        item: "{{item}}"
+        quantity: 2
+    expect:
+      status: 201
+      body:
+        - path: status
+          value: created
+        - path: item
+          value: "{{item}}"
+        - path: id
+          op: matches
+          value: "^[0-9]+$"
+    capture:
+      orderId: id
+    variants:
+      - id: no-token
+        name: Rejected without a token
+        auth: none
+        expect:
+          status: 401
+      - id: stale-token
+        name: Rejected with a stale token
+        auth: expired-token
+        expect:
+          status: 401
+          body:
+            - path: error
+              value: unauthorized
+      - id: zero-quantity
+        name: Rejected when quantity is zero
+        http:
+          body:
+            quantity: 0
+        expect:
+          status: 400
+          body:
+            - path: error
+              op: contains
+              value: quantity
+
+  - id: read-order
+    name: Read the order back
+    type: http
+    http:
+      method: GET
+      url: "{{baseUrl}}/orders/{{orderId}}"
+    expect:
+      status: 200
+      body:
+        - path: id
+          value: "{{orderId}}"
+        - path: quantity
+          value: 2
+      maxDurationMs: 2000
+    variants:
+      - id: unknown-id
+        name: Unknown order id is a 404
+        http:
+          url: "{{baseUrl}}/orders/does-not-exist"
+        # No expect block: a negative case passes on any non-2xx status.
+
+  - id: delete-order
+    name: Delete the order
+    type: http
+    http:
+      method: DELETE
+      url: "{{baseUrl}}/orders/{{orderId}}"
+    expect:
+      status: 204
+
+  - id: order-is-gone
+    name: Deleted order can no longer be read
+    type: http
+    kind: negative
+    http:
+      method: GET
+      url: "{{baseUrl}}/orders/{{orderId}}"
+    expect:
+      status: 404

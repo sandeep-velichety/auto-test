@@ -1,0 +1,5 @@
+id: expired-token
+name: Stale bearer token
+type: bearer
+bearer:
+  token: this-token-is-not-valid
