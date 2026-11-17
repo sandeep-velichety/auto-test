@@ -35,6 +35,7 @@ const usage = `testplane - scenario based API, messaging and data test runner
 Usage:
   testplane serve     --workspace DIR [--addr :8080] [--token T]   web UI + REST API
   testplane run       --workspace DIR --app ID [options]      run tests headless (CI/CD)
+                      [--environment ENV/REGION]              limit this backend to one environment, e.g. stage/NA
   testplane validate  --workspace DIR [--app ID]              check YAML, global auth and certificates
   testplane migrate   --workspace DIR                         move auth and certificates kept inside applications to global/
   testplane list      --workspace DIR                         list applications and scenarios
@@ -156,21 +157,71 @@ func serve(args []string) {
 	addr := fs.String("addr", "127.0.0.1:8080", "listen address (the API has no login; bind beyond localhost only on a trusted network)")
 	token := fs.String("token", os.Getenv("TESTPLANE_TOKEN"), "access token every API call must present (default $TESTPLANE_TOKEN; empty = no check)")
 	retention := fs.Int("retention-days", 0, "delete stored runs older than this many days (0 = keep all)")
+	scope := fs.String("environment", os.Getenv("TESTPLANE_ENVIRONMENT"), "the one environment this backend runs, e.g. stage/NA (environment/region) or stage; runs against anything else are refused (default $TESTPLANE_ENVIRONMENT; empty = any)")
 	var origins multi
 	fs.Var(&origins, "allow-origin", "web origin allowed to call this backend from a browser, e.g. https://tests.example.com; repeat, or * for any (default: any when a token is set)")
 	_ = fs.Parse(args)
 	if err := os.MkdirAll(filepath.Join(*ws, "applications"), 0o755); err != nil {
 		die(err)
 	}
-	srv := api.New(openStore(*ws), web.FS())
+	st := openStore(*ws)
+	if err := st.EnsureGlobal(); err != nil {
+		die(err)
+	}
+	if *scope != "" {
+		if err := ensureScope(st, *scope); err != nil {
+			die(err)
+		}
+	}
+	srv := api.New(st, web.FS())
+	srv.Engine.Scope = *scope
 	srv.Token, srv.AllowOrigins, srv.RetentionDays = *token, csv(origins), *retention
 	srv.Prune()
 	access := "no access token (anyone who can reach this address can use it)"
 	if *token != "" {
 		access = "access token required"
 	}
-	fmt.Printf("testplane %s\nworkspace %s\n%s\nlistening on http://%s\n", version, *ws, access, *addr)
+	runs := "runs any environment"
+	if *scope != "" {
+		runs = "runs " + *scope + " only"
+	}
+	fmt.Printf("testplane %s\nworkspace %s\n%s\n%s\nlistening on http://%s\n", version, *ws, runs, access, *addr)
 	die(http.ListenAndServe(*addr, srv.Handler()))
+}
+
+// ensureScope makes sure the environment (and region) a backend is
+// limited to is in the workspace's global list, adding it if needed.
+func ensureScope(st *store.Store, scope string) error {
+	g, err := st.GetGlobal()
+	if err != nil {
+		return err
+	}
+	name, region, _ := strings.Cut(scope, "/")
+	has := func(list []string, v string) bool {
+		for _, x := range list {
+			if x == v {
+				return true
+			}
+		}
+		return false
+	}
+	changed := false
+	if !has(g.Environments, name) {
+		g.Environments, changed = append(g.Environments, name), true
+	}
+	if region != "" && !has(g.Regions, region) {
+		g.Regions, changed = append(g.Regions, region), true
+	}
+	if changed {
+		if !g.Has(g.DefaultEnvironment) {
+			g.DefaultEnvironment = ""
+		}
+		if err := st.SaveGlobal(g); err != nil {
+			return fmt.Errorf("--environment %s: %w", scope, err)
+		}
+		fmt.Printf("added %s to the global list of environments and regions\n", scope)
+	}
+	return nil
 }
 
 func run(args []string) int {

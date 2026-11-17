@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import { api, download } from './api'
+import { api, connections, copy, download, isConflict } from './api'
 import { EnvValues } from './EnvValues'
-import type { Application, Asset, AuthProfile, Global } from './types'
-import { Badge, Field, FileButton, Notice, Select, Text, useAction } from './widgets'
+import type { Application, Asset, AuthProfile, Backend, Global } from './types'
+import { Badge, CopyToBackend, Field, FileButton, Notice, Select, Text, useAction } from './widgets'
 
 /** An application's own settings: its values for the global environments, and its proto files. */
 export function EnvPanel({ app, global, profiles, protos, onSaved, onDeleted, reloadProtos, openGlobal }: {
@@ -11,7 +11,21 @@ export function EnvPanel({ app, global, profiles, protos, onSaved, onDeleted, re
 }) {
   const [a, setA] = useState<Application>(app)
   const [dirty, setDirty] = useState(false)
+  const [copied, setCopied] = useState('')
   const act = useAction()
+  // Another backend gets the application and its scenarios; it keeps its own
+  // auth, certificates and its own values for the environment it runs.
+  const copyTo = (target: Backend) => act.run(async () => {
+    setCopied('')
+    if (dirty) throw new Error('Save your changes first, so the copy has them.')
+    let res
+    try { res = await copy.app(target, a.id) } catch (e) {
+      if (!isConflict(e)) throw e
+      if (!confirm(`“${a.name}” already exists on ${target.name}. Update it there? Its settings and scenarios are updated from here; ${target.name} keeps its own auth, certificates, and its own values for the environment it runs.`)) return
+      res = await copy.app(target, a.id, true)
+    }
+    setCopied(`Copied “${a.name}” to ${target.name}.` + (res.missing.length ? ` Still to set up there under Global: ${res.missing.join(', ')}.` : ' Nothing else needs setting up there.'))
+  })
   const set = (patch: Partial<Application>) => { setA({ ...a, ...patch }); setDirty(true) }
   const paired = (global.regions || []).length > 0
   const save = () => act.run(async () => { const s = await api.saveApp(a); setA(s); setDirty(false); onSaved(s) })
@@ -62,6 +76,11 @@ export function EnvPanel({ app, global, profiles, protos, onSaved, onDeleted, re
       {protos.length === 0 && <p className="muted">None uploaded.</p>}
 
       <h3>Share or remove</h3>
+      {copied && <Notice kind="ok" onClose={() => setCopied('')}>{copied}</Notice>}
+      <div className="row">
+        <CopyToBackend what="application" others={connections.list().filter(b => b.id !== connections.current().id)} onCopy={copyTo} disabled={act.busy} />
+        <span className="hint">Sends this application and its scenarios to another backend, for example from stage to prod. Auth, certificates and secrets are not copied: each backend keeps its own.</span>
+      </div>
       <div className="row">
         <button type="button" disabled={act.busy} onClick={() => act.run(async () => {
           download(await api.exportApp(a.id), a.id + '.zip')

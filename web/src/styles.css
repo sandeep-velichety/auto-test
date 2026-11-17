@@ -132,3 +132,5 @@ details { margin: 6px 0; } summary { cursor: pointer; color: var(--muted); }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 10px; }
 .chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--accent-soft); font-weight: 600; }
 .side-item.global { display: flex; flex-direction: column; gap: 1px; margin-bottom: 12px; } .side-item.global .side-sub { word-break: normal; }
+.copy-to { max-width: 190px; }
+.backend-note { white-space: nowrap; }

@@ -51,6 +51,7 @@ Everything is set with command-line flags; there is no config file.
 | `serve` | `--addr HOST:PORT` | `127.0.0.1:8080` | listen address |
 | `serve` | `--token T` | `$TESTPLANE_TOKEN` | access token every API call must present; empty means no check |
 | `serve` | `--allow-origin URL` | any origin when a token is set, otherwise none | other web origins whose UI may connect to this backend; repeatable, `*` for any |
+| `serve` | `--environment ENV/REGION` (or `TESTPLANE_ENVIRONMENT`) | any environment | the one environment this backend runs, e.g. `stage/NA`, or `stage` for every region of stage; runs against anything else are refused |
 | `serve` | `--retention-days N` | `0` (keep all) | delete stored runs older than N days |
 | `run` | `--app`, `--env`, `--scenario`, `--tag`, `--kind`, `--var`, `--junit`, `--json`, `--save`, `--publish`, `--by`, `--quiet` | | see the README |
 | `validate` | `--app ID` | all applications | check YAML, auth references and certificate files |
@@ -66,6 +67,21 @@ Environment variables the process reads:
 | `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` | honoured by HTTP steps and OAuth2 token requests |
 
 Exit codes of `run`: `0` all passed, `1` at least one test failed, `2` could not run. `validate` exits `1` when it finds problems.
+
+## One backend per environment and region
+
+The usual layout is one backend next to each environment's services, each with its own workspace folder and its own certificates and secrets:
+
+| Backend | Started with | Reaches |
+| --- | --- | --- |
+| stage, NA | `--environment stage/NA` | stage services in NA |
+| qa, NA | `--environment qa/NA` | qa services in NA |
+| prod, NA | `--environment prod/NA` | prod services in NA |
+| stage, AU … | `--environment stage/AU` … | … |
+
+Each backend refuses to run any other environment and tells the UI which one it runs, so the Environment and Region pickers connect a tester to the right backend. Testers add each backend's address once in their browser. Because a tester's browser talks to every backend, start each with a token (or `--allow-origin` for the address the UI is opened from).
+
+Scenarios are written on one backend (normally stage) and sent to the others with "Copy to backend…" in the UI. Auth profiles, certificates and secrets are never copied: set them up once on each backend under Global. If the environment is not yet in a workspace's global list, starting the backend adds it.
 
 ## Run on a server (systemd)
 

@@ -37,7 +37,14 @@ type Options struct {
 	OnTest func(scenario *model.Scenario, r *model.TestResult)
 }
 
-type Engine struct{ Store *store.Store }
+type Engine struct {
+	Store *store.Store
+	// Scope, when set, is the only environment this backend runs: an
+	// environment ("stage") or an environment/region pair ("stage/NA").
+	// A stage backend sits where it can reach stage services and holds
+	// stage's certificates; it must never be pointed at anything else.
+	Scope string
+}
 
 func New(s *store.Store) *Engine { return &Engine{Store: s} }
 
@@ -133,11 +140,23 @@ func (e *Engine) environment(app *model.Application, envName string) (string, ma
 	if err != nil {
 		return "", nil, err
 	}
-	if envName == "" {
-		envName = app.DefaultEnvironment
+	// With nothing asked for: the application's default, then the global
+	// one, as far as this backend may run them; else what it does run.
+	for _, d := range []string{app.DefaultEnvironment, g.DefaultEnvironment} {
+		if envName == "" && d != "" && model.EnvCovers(e.Scope, d) {
+			envName = d
+		}
 	}
-	if envName == "" {
-		envName = g.DefaultEnvironment
+	if envName == "" && e.Scope != "" {
+		for _, k := range g.Keys() {
+			if model.EnvCovers(e.Scope, k) {
+				envName = k
+				break
+			}
+		}
+	}
+	if !model.EnvCovers(e.Scope, envName) {
+		return "", nil, fmt.Errorf("%w: this backend runs %s only; connect to the backend for %s to run there", store.ErrInvalid, e.Scope, envName)
 	}
 	if envName != "" && !g.Has(envName) {
 		return "", nil, fmt.Errorf("%w: there is no environment %q; the global list has %s", store.ErrInvalid, envName, strings.Join(g.Keys(), ", "))

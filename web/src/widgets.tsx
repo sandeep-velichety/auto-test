@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { Dict } from './types'
+import type { Backend, Dict } from './types'
 
 export function Field({ label, hint, children, wide, group }: { label: string; hint?: string; children: ReactNode; wide?: boolean; group?: boolean }) {
   const cls = 'field' + (wide ? ' wide' : '')
@@ -154,4 +154,19 @@ export function useAction() {
     try { await fn() } catch (e: any) { if (alive.current) setError(e?.message || String(e)) } finally { if (alive.current) setBusy(false) }
   }
   return { busy, error, setError, run }
+}
+
+/**
+ * A menu of the other saved backends. Choosing one copies something there.
+ * Auth, certificates and secrets never travel: each backend keeps its own.
+ */
+export function CopyToBackend({ what, others, onCopy, disabled }: { what: string; others: Backend[]; onCopy: (target: Backend) => void; disabled?: boolean }) {
+  return (
+    <select className="copy-to" aria-label={`Copy this ${what} to another backend`} title={`Send this ${what} to another backend. Auth, certificates and secrets are not copied.`} value="" disabled={disabled}
+      onChange={e => { const t = others.find(b => b.id === e.target.value); if (t) onCopy(t) }}>
+      <option value="">Copy to backend…</option>
+      {others.map(b => <option key={b.id} value={b.id}>{b.name}{b.environment ? ` (${b.environment.replace('/', ' · ')})` : ''}</option>)}
+      {others.length === 0 && <option disabled>No other backend saved. Add one under “Backend”.</option>}
+    </select>
+  )
 }

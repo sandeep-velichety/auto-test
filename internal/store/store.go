@@ -202,6 +202,20 @@ func globalFromApps(apps []model.Application) *model.Global {
 	return g
 }
 
+// EnsureGlobal writes settings.yaml if the workspace has none, so the list
+// of environments is fixed from the start and does not follow whatever the
+// first applications happen to define.
+func (s *Store) EnsureGlobal() error {
+	if _, err := os.Stat(s.globalPath()); err == nil {
+		return nil
+	}
+	g, err := s.GetGlobal()
+	if err != nil {
+		return err
+	}
+	return s.SaveGlobal(g)
+}
+
 func (s *Store) SaveGlobal(g *model.Global) error {
 	if errs := g.Validate(); len(errs) > 0 {
 		return invalid("%s", strings.Join(errs, "; "))

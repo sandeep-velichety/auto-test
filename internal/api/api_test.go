@@ -186,7 +186,7 @@ func TestWorkspaceLifecycleOverHTTP(t *testing.T) {
 	if code := c.do("GET", "/api/apps/shop", nil, nil); code != 404 {
 		t.Fatalf("deleted app: %d", code)
 	}
-	var imported map[string]string
+	var imported map[string]any
 	if code := c.do("POST", "/api/import", zipped, &imported); code != 200 || imported["id"] != "shop" {
 		t.Fatalf("import: %d %v", code, imported)
 	}
@@ -330,5 +330,52 @@ func TestDuplicateNamesAnswerConflictOverHTTP(t *testing.T) {
 	}
 	if code := c.do("POST", "/api/import?replace=true", zip, nil); code != 200 {
 		t.Fatalf("importing it as an update: %d", code)
+	}
+}
+
+// A backend started for one environment says so, and refuses runs against
+// any other. A UI uses this to pick the backend for an environment and region.
+func TestBackendEnvironmentOverHTTP(t *testing.T) {
+	st := store.New(t.TempDir())
+	s := New(st, nil)
+	s.Engine.Scope = "qa/AU"
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+	c := client{t, srv.URL}
+
+	var meta struct{ Environment string }
+	if code := c.do("GET", "/api/meta", nil, &meta); code != 200 || meta.Environment != "qa/AU" {
+		t.Fatalf("meta: %d %+v", code, meta)
+	}
+	var g struct{ Scope string }
+	if code := c.do("GET", "/api/global", nil, &g); code != 200 || g.Scope != "qa/AU" {
+		t.Fatalf("global: %d %+v", code, g)
+	}
+	c.do("PUT", "/api/apps/orders", model.Application{Name: "Orders"}, nil)
+	c.do("PUT", "/api/apps/orders/scenarios/empty", model.Scenario{Name: "Empty"}, nil)
+	var res model.RunResult
+	if code := c.do("POST", "/api/apps/orders/run", map[string]any{}, &res); code != 200 || res.Environment != "qa/AU" {
+		t.Fatalf("a run with no environment uses the backend's: %d %+v", code, res.Environment)
+	}
+	var e struct{ Error string }
+	if code := c.do("POST", "/api/apps/orders/run", map[string]any{"environment": "prod/AU"}, &e); code != 400 || !strings.Contains(e.Error, "runs qa/AU only") {
+		t.Fatalf("prod on the qa backend: %d %+v", code, e)
+	}
+
+	// Copy to another backend: the application without global auth, and
+	// the answer says what the receiving backend still lacks.
+	c.do("PUT", "/api/apps/orders/scenarios/pay", model.Scenario{Name: "Pay", Auth: "idp", Tests: []model.Test{{ID: "t", Name: "T", Type: "http", HTTP: &model.HTTPStep{URL: "http://x"}}}}, nil)
+	var zip []byte
+	if code := c.do("GET", "/api/apps/orders/export?global=false", nil, &zip); code != 200 {
+		t.Fatalf("export: %d", code)
+	}
+	other := httptest.NewServer(New(store.New(t.TempDir()), nil).Handler())
+	defer other.Close()
+	var imported struct {
+		ID      string
+		Missing []string
+	}
+	if code := (client{t, other.URL}).do("POST", "/api/import", zip, &imported); code != 200 || imported.ID != "orders" || len(imported.Missing) != 1 || imported.Missing[0] != "auth profile idp" {
+		t.Fatalf("copy: %d %+v", code, imported)
 	}
 }

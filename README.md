@@ -92,8 +92,26 @@ A **backend** is one running `testplane serve` with its workspace. It keeps the 
 
 ```bash
 TESTPLANE_TOKEN=choose-a-long-random-value \
-  ./bin/testplane serve --workspace /srv/testplane/qa --addr 0.0.0.0:8080 --retention-days 90
+  ./bin/testplane serve --workspace /srv/testplane/stage-na --addr 0.0.0.0:8080 \
+    --environment stage/NA --retention-days 90
 ```
+
+### One backend per environment and region
+
+Run one backend where it can reach each environment's services: stage/NA, qa/NA, prod/NA, stage/AU and so on. Start each with `--environment ENV/REGION`. That backend then:
+
+- holds the certificates, auth profiles and secrets for that environment, set up once under Global on that backend;
+- runs only that environment. A run against anything else is refused, whatever a scenario or default says;
+- reports its environment, so the UI knows which backend runs what.
+
+In the UI, add each backend's address once (click the backend name at the top of the sidebar). After that the **Environment** and **Region** pickers at the top of the page choose the backend: pick prod and AU, confirm, and you are connected to the prod/AU backend with its applications, auth and certificates. If no saved backend runs the pair you pick, the UI asks for its address.
+
+**Moving tests between backends.** Each backend has its own workspace. "Copy to backend…" (on a scenario, and under an application's "Environments & settings") sends the application or scenario to another saved backend, for example from stage to prod:
+
+- Auth profiles, certificates and secrets are never copied. Each backend keeps its own, and the copy reports which ones the receiving backend still has to set up.
+- If the application already exists there, it is updated after a confirmation, and the receiving backend keeps its own values (addresses) for the environment it runs.
+
+A backend started without `--environment` runs any environment, which suits a single shared backend or a laptop.
 
 - **Connecting:** in the UI, click the backend name at the top of the sidebar, add the backend's address and access token, and switch between backends (for example QA and staging) at any time. Connections are remembered in that browser.
 - **Access token:** with `--token` (or `TESTPLANE_TOKEN`) every API call must carry the token. Without it the backend is open to anyone who can reach it.

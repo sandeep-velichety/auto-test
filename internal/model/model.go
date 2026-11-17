@@ -125,6 +125,20 @@ func (g *Global) Validate() []string {
 	return errs
 }
 
+// EnvCovers reports whether a backend limited to scope may run env. A
+// scope is an environment ("stage": every region of it) or an
+// environment/region pair ("stage/NA"). An empty scope allows everything.
+func EnvCovers(scope, env string) bool {
+	if scope == "" || scope == env {
+		return true
+	}
+	if strings.Contains(scope, "/") {
+		return false
+	}
+	name, _, _ := strings.Cut(env, "/")
+	return name == scope
+}
+
 // LayeredValues reads per-environment values for one run target: values
 // under the environment name, then the region, then the exact pair, each
 // overriding the one before.

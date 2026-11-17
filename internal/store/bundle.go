@@ -185,7 +185,7 @@ type ImportResult struct {
 	Created  []string  `json:"created"`
 	Kept     []string  `json:"kept"` // already existed and were left untouched
 	Requires *Requires `json:"requires,omitempty"`
-	Missing  []string  `json:"missing,omitempty"` // required variables and files this application lacks
+	Missing  []string  `json:"missing,omitempty"` // variables, files, auth profiles and certificate sets it needs that are not here
 }
 
 // ImportScenario stores a scenario from YAML: either a bundle written by
@@ -269,6 +269,11 @@ func (s *Store) ImportScenario(app string, data []byte, overwrite bool) (*Import
 	m := &migration{s: s, keep: true, auth: map[string]map[string]string{}, sets: map[string]map[string]string{}}
 	if err := m.rewriteRefs(app); err != nil {
 		return nil, err
+	}
+	// Auth and certificates it names that this workspace does not have (a
+	// plain scenario file, or a copy from another backend, brings none).
+	if saved, err := s.GetScenario(app, sc.ID); err == nil {
+		res.Missing = append(res.Missing, s.missingRefs("", []model.Scenario{*saved})...)
 	}
 	if b.Requires != nil {
 		env := map[string]string{}

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { api, download, parseCurl, slug, uniqueId, uniqueName } from './api'
-import type { Application, AuthProfile, CertSet, RunResult, Scenario, Test, TestType } from './types'
-import { Field, KV, Notice, Section, StatusBadge, Text, useAction } from './widgets'
+import { api, connections, copy, download, isConflict, parseCurl, slug, uniqueId, uniqueName } from './api'
+import type { Application, AuthProfile, Backend, CertSet, RunResult, Scenario, Test, TestType } from './types'
+import { CopyToBackend, Field, KV, Notice, Section, StatusBadge, Text, useAction } from './widgets'
 import { AuthSelect, blankStep, KindBadge, MtlsSelect, TestEditor, TYPE_LABEL, TypeBadge } from './TestEditor'
 import { RunView } from './RunView'
 import { History } from './History'
@@ -38,6 +38,7 @@ export function ScenarioEditor({ app, scenarioId, profiles, sets, protos, env, e
   const [run, setRun] = useState<RunResult | null>(null)
   const [saved, setSaved] = useState(false)
   const [curl, setCurl] = useState<string | null>(null)
+  const [copied, setCopied] = useState('')
   const load = useAction()
   const act = useAction()
 
@@ -108,6 +109,19 @@ export function ScenarioEditor({ app, scenarioId, profiles, sets, protos, env, e
     const fresh = untilIndex === undefined ? undefined : (await api.scenarios(app.id)).find(s => s.id === sc.id)?.tests[untilIndex]?.id
     await act.run(async () => { setRun(null); setRun(await api.run(app.id, { environment: env, scenarios: [sc.id], until: fresh })) })
   }
+  // Send this scenario to another backend (stage to prod, say). That backend
+  // keeps its own auth and certificates; nothing secret travels.
+  const copyTo = (target: Backend) => act.run(async () => {
+    setCopied('')
+    let res
+    try { res = await copy.scenario(target, app.id, sc.id) } catch (e: any) {
+      if (e?.status === 404) throw new Error(`${target.name} does not have the application “${app.name}” yet. Copy the application first: Environments & settings, “Copy to backend…”.`)
+      if (!isConflict(e)) throw e
+      if (!confirm(`Scenario “${sc.name}” already exists on ${target.name}. Update it there? Its tests there will be replaced.`)) return
+      res = await copy.scenario(target, app.id, sc.id, true)
+    }
+    setCopied(`Copied “${sc.name}” to ${target.name}.` + (res.missing.length ? ` Still to set up there: ${res.missing.join(', ')}.` : ' Nothing else needs setting up there.'))
+  })
   const addFromCurl = () => {
     const parsed = parseCurl(curl || '')
     if (!parsed) { act.setError('That does not look like a curl command. It should start with “curl” and contain a URL.'); return }
@@ -139,12 +153,14 @@ export function ScenarioEditor({ app, scenarioId, profiles, sets, protos, env, e
           </div>
           <button type="button" title="The scenario with the global auth profiles and certificate sets it uses, in one YAML file" disabled={act.busy || dirty}
             onClick={() => act.run(async () => download(await api.exportScenario(app.id, sc.id), sc.id + '.scenario.yaml'))}>Download YAML</button>
+          <CopyToBackend what="scenario" others={connections.list().filter(b => b.id !== connections.current().id)} onCopy={copyTo} disabled={act.busy || dirty} />
           <button type="button" className="link danger" onClick={remove}>Delete</button>
           <button type="button" onClick={save} disabled={act.busy || !dirty}>{saved && !dirty ? 'Saved' : 'Save'}</button>
           <button type="button" className="primary" onClick={() => runNow()} disabled={act.busy || sc.tests.length === 0}>{act.busy ? 'Working…' : dirty ? 'Save and run' : 'Run scenario'}</button>
         </div>
       </div>
       {act.error && <Notice kind="error" onClose={() => act.setError('')}>{act.error}</Notice>}
+      {copied && <Notice kind="ok" onClose={() => setCopied('')}>{copied}</Notice>}
 
       {mode === 'yaml' ? (
         <div>

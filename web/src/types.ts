@@ -9,6 +9,8 @@ export interface Global {
   values?: Record<string, Dict>
   /** What a run can target: environments, or environment/region pairs. */
   keys: string[]
+  /** The one environment this backend runs, when it is limited to one. */
+  scope?: string
 }
 
 /** Which scenarios use each global auth profile and certificate set ("app/scenario"). */
@@ -113,7 +115,11 @@ export interface RunResult {
 export interface AuthCheckResult { ok: boolean; error?: string; sends?: string[]; clientCert: boolean; certChecks?: CertCheck[] }
 
 /** A backend the UI can connect to. url '' means the server this page came from. */
-export interface Backend { id: string; name: string; url: string; token?: string; user?: string }
+export interface Backend {
+  id: string; name: string; url: string; token?: string; user?: string
+  /** The one environment this backend runs ("stage/NA" or "stage"), as it reported itself. Empty: any. */
+  environment?: string
+}
 
 export interface RunQuery { scenario?: string; status?: string; env?: string; from?: string; to?: string; limit?: number }
 

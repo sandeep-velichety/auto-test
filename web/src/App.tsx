@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { api, connections, isConflict, slug, uniqueId } from './api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { api, connections, covers, isConflict, slug, uniqueId } from './api'
 import { Backends } from './Backends'
 import { History } from './History'
 import type { Application, Asset, AuthProfile, CertSet, Global, RunResult, Scenario, Usage } from './types'
@@ -62,6 +62,10 @@ export default function App() {
   const [last, setLast] = useState<Record<string, { status: string; at: string }>>({})
   const [notice, setNotice] = useState('')
   const [showBackends, setShowBackends] = useState(false)
+  // The environment that has no saved backend yet (shown in the Backends dialog).
+  const [needBackend, setNeedBackend] = useState('')
+  // The environment to select once the backend just switched to has loaded.
+  const wanted = useRef('')
   const [backend, setBackend] = useState(connections.current())
   const top = useAction()
   const runAct = useAction()
@@ -90,6 +94,8 @@ export default function App() {
     top.run(async () => {
       const [list, g] = await Promise.all([loadApps(), api.global()])
       setGlobal(g)
+      // Remember what this backend runs, so the pickers can come back to it.
+      connections.setEnvironment(backend.id, g.scope)
       const r = parseHash()
       if (r.global) return
       if (!list.some(a => a.id === r.app)) go(list[0] ? { app: list[0].id, tab: 'scenarios' } : { tab: 'scenarios' })
@@ -113,8 +119,16 @@ export default function App() {
     setScenarios([]); setProtos([]); setLastRun(null)
   }, [app?.id]) // eslint-disable-line
   // The environment a view starts in: the application's default, else the global one.
-  const startEnv = (app?.defaultEnvironment && keys.includes(app.defaultEnvironment) ? app.defaultEnvironment : '') || global?.defaultEnvironment || keys[0] || ''
-  useEffect(() => { if (global) setEnv(startEnv) }, [app?.id, startEnv, !!global]) // eslint-disable-line
+  // A backend limited to one environment (scope) only ever starts in it.
+  const scope = global?.scope
+  const runnable = keys.filter(k => covers(scope, k))
+  const startEnv = [app?.defaultEnvironment, global?.defaultEnvironment].find(d => !!d && runnable.includes(d)) || runnable[0] || keys[0] || ''
+  useEffect(() => {
+    if (!global) return
+    const next = wanted.current && runnable.includes(wanted.current) ? wanted.current : startEnv
+    wanted.current = ''
+    setEnv(next)
+  }, [app?.id, startEnv, !!global]) // eslint-disable-line
   const envReady = !!global && keys.includes(env)
   // The list can change under Global: never stay on a target that is gone.
   useEffect(() => { if (global && env && !keys.includes(env)) setEnv(startEnv) }, [keys.join()]) // eslint-disable-line
@@ -184,16 +198,34 @@ export default function App() {
     await Promise.all([loadApps(), reloadGlobal()]); go({ app: r.id, tab: 'scenarios' })
   })
 
+  // Choosing an environment and region chooses the backend that runs it.
+  // Each backend sits next to one environment's services and holds its
+  // certificates, so the pickers switch backends where needed.
+  const pickEnv = (next: string) => {
+    if (covers(scope, next)) { setEnv(next); return }
+    const pretty = next.replace('/', ' · ')
+    const target = connections.backendFor(next)
+    if (!target) { setNeedBackend(next); setShowBackends(true); return }
+    if (!confirm(`${pretty} runs on the backend “${target.name}”. Connect to it? You will see that backend’s applications, auth and certificates. Unsaved changes here are not carried over.`)) return
+    wanted.current = next
+    connections.use(target.id)
+    setBackend({ ...connections.current() })
+  }
   // With regions, a target is "environment/region": offer two pickers.
   const paired = (global?.regions || []).length > 0
   const [envPart, regionPart] = paired ? [env.split('/')[0], env.split('/').slice(1).join('/')] : [env, '']
+  const where = scope ? <span className="muted backend-note" title="This backend runs one environment only. Choosing another one connects to the backend that runs it.">on {backend.name}</span> : null
   const envPicker = paired ? (
     <>
-      <label className="inline">Environment <Select value={envPart} onChange={e => setEnv(`${e}/${regionPart}`)} options={global?.environments || []} /></label>
-      <label className="inline">Region <Select value={regionPart} onChange={r => setEnv(`${envPart}/${r}`)} options={global?.regions || []} /></label>
+      <label className="inline">Environment <Select value={envPart} onChange={e => pickEnv(`${e}/${regionPart}`)} options={global?.environments || []} /></label>
+      <label className="inline">Region <Select value={regionPart} onChange={r => pickEnv(`${envPart}/${r}`)} options={global?.regions || []} /></label>
+      {where}
     </>
   ) : (
-    <label className="inline">Environment <Select value={env} onChange={setEnv} options={keys.length ? keys : [['', '(none defined)']]} /></label>
+    <>
+      <label className="inline">Environment <Select value={env} onChange={pickEnv} options={keys.length ? keys : [['', '(none defined)']]} /></label>
+      {where}
+    </>
   )
   const deleteApp = () => {
     if (!app || !confirm(`Delete application “${app.name}” with all its scenarios and run history? Global auth and certificates are not touched. This cannot be undone.`)) return
@@ -206,9 +238,9 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand">Testplane</div>
         <div className="side-label">Backend</div>
-        <button type="button" className="side-item backend" onClick={() => setShowBackends(true)} title="Switch or add a backend">
+        <button type="button" className="side-item backend" onClick={() => { setNeedBackend(''); setShowBackends(true) }} title="Switch or add a backend">
           <span>{backend.name}</span>
-          <span className="side-sub">{backend.url || 'this server'} · change</span>
+          <span className="side-sub">{scope ? `runs ${scope.replace('/', ' · ')} only` : 'runs any environment'} · change</span>
         </button>
         <div className="side-label">Shared by all applications</div>
         <button type="button" className={'side-item global' + (route.global ? ' on' : '')} onClick={() => go({ tab: 'scenarios', global: 'auth' })} title="Auth, certificates, environments and regions used by every application">
@@ -229,7 +261,7 @@ export default function App() {
         </div>
       </aside>
 
-      {showBackends && <Backends onClose={() => setShowBackends(false)} onChanged={() => setBackend({ ...connections.current() })} />}
+      {showBackends && <Backends need={needBackend} onClose={() => setShowBackends(false)} onChanged={() => setBackend({ ...connections.current() })} />}
       <main className="main">
         {top.error && <Notice kind="error" onClose={() => top.setError('')}>{top.error}</Notice>}
         {!apps && !top.error && <p className="muted">Loading…</p>}

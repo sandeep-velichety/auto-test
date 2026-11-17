@@ -190,6 +190,16 @@ func TestGlobalSettings(t *testing.T) {
 	if err != nil || strings.Join(g.Keys(), ",") != "stage/NA,stage/AU,qa/NA,qa/AU,prod/NA,prod/AU" || g.DefaultEnvironment != "stage/NA" {
 		t.Fatalf("default: %+v %v", g, err)
 	}
+	// A backend pins the list when it starts, so a new workspace keeps the
+	// standard one whatever its first application defines.
+	pinned := New(t.TempDir())
+	if err := pinned.EnsureGlobal(); err != nil {
+		t.Fatal(err)
+	}
+	_ = pinned.SaveApp(&model.Application{ID: "a", Environments: map[string]map[string]string{"stage/NA": {}}})
+	if g, _ := pinned.GetGlobal(); len(g.Keys()) != 6 {
+		t.Fatalf("pinned list changed: %+v", g)
+	}
 	// Without the file, the list follows what the applications use.
 	_ = s.SaveApp(&model.Application{ID: "a", DefaultEnvironment: "dev", Environments: map[string]map[string]string{"dev": {}, "staging": {}}})
 	if g, _ = s.GetGlobal(); strings.Join(g.Keys(), ",") != "dev,staging" || g.DefaultEnvironment != "dev" {

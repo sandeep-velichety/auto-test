@@ -50,6 +50,8 @@ type authView struct {
 
 type globalView struct {
 	model.Global
+	// Scope is the one environment this backend runs, if it is limited.
+	Scope string `json:"scope,omitempty"`
 	// Keys are the targets a run can choose: environments, or
 	// environment/region pairs.
 	Keys []string `json:"keys"`
@@ -158,7 +160,10 @@ func (s *Server) Handler() http.Handler {
 	// Open on purpose: it is the health check and tells a client whether a
 	// token is needed. It reveals nothing about the workspace.
 	mux.HandleFunc("GET /api/meta", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"name": "testplane", "authRequired": s.Token != "", "testTypes": model.TestTypes, "authTypes": model.AuthTypes, "assertionOps": assert.Ops})
+		// "environment" is what this backend runs when it is limited to
+		// one (serve --environment); a UI uses it to pick the right
+		// backend for an environment and region.
+		writeJSON(w, 200, map[string]any{"name": "testplane", "authRequired": s.Token != "", "environment": s.Engine.Scope, "testTypes": model.TestTypes, "authTypes": model.AuthTypes, "assertionOps": assert.Ops})
 	})
 
 	// applications
@@ -202,7 +207,16 @@ func (s *Server) Handler() http.Handler {
 		app := r.PathValue("app")
 		var buf bytes.Buffer
 		// Keys and literal secrets never leave through the API.
-		if err := st.ExportApp(app, &buf, false); err != nil {
+		// ?global=false leaves out the copies of global auth and
+		// certificates: used when copying to another backend, which has
+		// its own.
+		var err error
+		if r.URL.Query().Get("global") == "false" {
+			err = st.ExportAppOnly(app, &buf)
+		} else {
+			err = st.ExportApp(app, &buf, false)
+		}
+		if err != nil {
 			fail(w, err)
 			return
 		}
@@ -216,12 +230,14 @@ func (s *Server) Handler() http.Handler {
 			fail(w, err)
 			return
 		}
-		id, err := st.ImportApp(b, r.URL.Query().Get("replace") == "true")
+		id, err := st.ImportAppFor(b, r.URL.Query().Get("replace") == "true", s.Engine.Scope)
 		if err != nil {
 			fail(w, err)
 			return
 		}
-		writeJSON(w, 200, map[string]string{"id": id})
+		// missing: global auth and certificates its scenarios name that
+		// this backend does not have yet.
+		writeJSON(w, 200, map[string]any{"id": id, "missing": st.MissingRefs(id)})
 	})
 
 	// scenarios
@@ -340,7 +356,7 @@ func (s *Server) Handler() http.Handler {
 			fail(w, err)
 			return
 		}
-		writeJSON(w, 200, globalView{Global: *g, Keys: g.Keys()})
+		writeJSON(w, 200, globalView{Global: *g, Keys: g.Keys(), Scope: s.Engine.Scope})
 	})
 	mux.HandleFunc("PUT /api/global", func(w http.ResponseWriter, r *http.Request) {
 		var g model.Global
@@ -352,7 +368,7 @@ func (s *Server) Handler() http.Handler {
 			fail(w, err)
 			return
 		}
-		writeJSON(w, 200, globalView{Global: g, Keys: g.Keys()})
+		writeJSON(w, 200, globalView{Global: g, Keys: g.Keys(), Scope: s.Engine.Scope})
 	})
 	// Which scenarios use each auth profile and certificate set.
 	mux.HandleFunc("GET /api/global/usage", func(w http.ResponseWriter, r *http.Request) {
@@ -371,7 +387,14 @@ func (s *Server) Handler() http.Handler {
 			return e
 		}
 		if g, err := st.GetGlobal(); err == nil {
-			return g.DefaultEnvironment
+			if model.EnvCovers(s.Engine.Scope, g.DefaultEnvironment) {
+				return g.DefaultEnvironment
+			}
+			for _, k := range g.Keys() {
+				if model.EnvCovers(s.Engine.Scope, k) {
+					return k
+				}
+			}
 		}
 		return ""
 	}

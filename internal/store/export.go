@@ -20,6 +20,17 @@ import (
 // Unless includeKeys is set, private keys are left out and literal secrets
 // in auth profiles are replaced with a placeholder.
 func (s *Store) ExportApp(app string, w io.Writer, includeKeys bool) error {
+	return s.exportApp(app, w, includeKeys, true)
+}
+
+// ExportAppOnly writes just the application: its settings, scenarios and
+// proto files, with nothing from global/. This is what is copied to
+// another backend, which keeps its own auth and certificates.
+func (s *Store) ExportAppOnly(app string, w io.Writer) error {
+	return s.exportApp(app, w, false, false)
+}
+
+func (s *Store) exportApp(app string, w io.Writer, includeKeys, global bool) error {
 	a, err := s.GetApp(app)
 	if err != nil {
 		return err
@@ -51,6 +62,10 @@ func (s *Store) ExportApp(app string, w io.Writer, includeKeys bool) error {
 	})
 	if err != nil {
 		return err
+	}
+
+	if !global {
+		return zw.Close()
 	}
 
 	// What the application refers to in global/.
@@ -176,6 +191,15 @@ func (s *Store) ExportApp(app string, w io.Writer, includeKeys bool) error {
 // Application names stay unique: a zip whose application has the name of a
 // different application here is refused.
 func (s *Store) ImportApp(data []byte, replace bool) (string, error) {
+	return s.ImportAppFor(data, replace, "")
+}
+
+// ImportAppFor is ImportApp on a backend that runs one environment only
+// (scope, as in model.EnvCovers). When the application already exists, its
+// own values for that environment, and its default environment and auth
+// profile, are kept: they describe this backend's surroundings, and a copy
+// made elsewhere must not replace them. Variables the copy adds are taken.
+func (s *Store) ImportAppFor(data []byte, replace bool, scope string) (string, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return "", invalid("not a zip file: %v", err)
@@ -245,7 +269,11 @@ func (s *Store) ImportApp(data []byte, replace bool) (string, error) {
 		incoming.Name = app
 	}
 	existing, _ := s.ListApps()
-	for _, o := range existing {
+	var before *model.Application
+	for i, o := range existing {
+		if o.ID == app {
+			before = &existing[i]
+		}
 		if o.ID == app && !replace {
 			return "", &ConflictError{Kind: "application", Name: o.Name, Existing: o.ID, Hint: "import as an update to replace its files with the ones in the zip"}
 		}
@@ -284,6 +312,37 @@ func (s *Store) ImportApp(data []byte, replace bool) (string, error) {
 	if _, err := s.GetApp(app); err != nil {
 		return "", invalid("zip has no valid application.yaml: %v", err)
 	}
+	if before != nil && scope != "" {
+		after, err := s.GetApp(app)
+		if err != nil {
+			return "", err
+		}
+		for key, mine := range before.Environments {
+			if !scopeKey(scope, key) {
+				continue
+			}
+			if after.Environments == nil {
+				after.Environments = map[string]map[string]string{}
+			}
+			merged := map[string]string{}
+			for k, v := range after.Environments[key] {
+				merged[k] = v
+			}
+			for k, v := range mine {
+				merged[k] = v
+			}
+			after.Environments[key] = merged
+		}
+		if before.DefaultEnvironment != "" {
+			after.DefaultEnvironment = before.DefaultEnvironment
+		}
+		if before.DefaultAuth != "" {
+			after.DefaultAuth = before.DefaultAuth
+		}
+		if err := s.SaveApp(after); err != nil {
+			return "", err
+		}
+	}
 	// An older zip carries its auth and certificates inside the application.
 	m := &migration{s: s, keep: true, auth: map[string]map[string]string{}, sets: map[string]map[string]string{}}
 	if err := m.moveApp(app); err != nil {
@@ -293,4 +352,58 @@ func (s *Store) ImportApp(data []byte, replace bool) (string, error) {
 		return "", err
 	}
 	return app, nil
+}
+
+// scopeKey reports whether values stored under key belong to the
+// environment a backend is limited to: the key itself, or any layer of it.
+func scopeKey(scope, key string) bool {
+	if model.EnvCovers(scope, key) {
+		return true
+	}
+	for _, layer := range model.EnvLayers(scope) {
+		if layer == key {
+			return true
+		}
+	}
+	return false
+}
+
+// MissingRefs lists the global auth profiles and certificate sets an
+// application's scenarios name that this workspace does not have, as
+// "auth profile <id>" and "certificate set <id>".
+func (s *Store) MissingRefs(app string) []string {
+	a, err := s.GetApp(app)
+	if err != nil {
+		return nil
+	}
+	scenarios, _ := s.ListScenarios(app)
+	return s.missingRefs(a.DefaultAuth, scenarios)
+}
+
+func (s *Store) missingRefs(defaultAuth string, scenarios []model.Scenario) []string {
+	auths, sets := map[string]bool{}, map[string]bool{}
+	if defaultAuth != "" && defaultAuth != model.AuthNone {
+		auths[defaultAuth] = true
+	}
+	for i := range scenarios {
+		au, se := scenarioRefs(&scenarios[i])
+		for _, id := range au {
+			auths[id] = true
+		}
+		for _, id := range se {
+			sets[id] = true
+		}
+	}
+	out := []string{}
+	for _, id := range sortedKeys(auths) {
+		if _, err := s.GetAuth(id); err != nil {
+			out = append(out, "auth profile "+id)
+		}
+	}
+	for _, id := range sortedKeys(sets) {
+		if _, err := s.GetCertSet(id); err != nil {
+			out = append(out, "certificate set "+id)
+		}
+	}
+	return out
 }

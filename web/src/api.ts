@@ -38,6 +38,21 @@ export const connections = {
     current = backends.find(b => b.id === id) || backends[0]
     write(CURRENT, current.id)
   },
+  /** Records what a backend says it runs, so the environment pickers can find it. */
+  setEnvironment(id: string, environment: string | undefined) {
+    const b = backends.find(x => x.id === id)
+    if (!b || (b.environment || '') === (environment || '')) return
+    this.save({ ...b, environment: environment || undefined })
+  },
+  /** A saved backend limited to exactly this environment (or to all of its regions). */
+  backendFor(env: string): Backend | undefined {
+    return backends.find(b => b.environment === env) || backends.find(b => !!b.environment && covers(b.environment, env))
+  },
+}
+
+/** Whether a backend limited to scope may run env (same rule as the backend's). */
+export function covers(scope: string | undefined, env: string): boolean {
+  return !scope || scope === env || (!scope.includes('/') && env.split('/')[0] === scope)
 }
 
 function headers(b: Backend, extra?: Record<string, string>): Record<string, string> {
@@ -101,15 +116,36 @@ async function call<T>(method: string, path: string, body?: unknown, raw = false
   return (raw ? res.text() : res.json()) as Promise<T>
 }
 
+const e = encodeURIComponent
+
 /** Checks an address and token before they are saved. */
-export async function testBackend(b: Backend): Promise<string> {
+export async function testBackend(b: Backend): Promise<{ message: string; environment?: string }> {
   const meta = await (await send(b, 'GET', '/meta')).json()
   if (meta.name !== 'testplane') throw new ApiError('That address answers, but it is not a Testplane backend.', 0)
   const apps: Application[] = await (await send(b, 'GET', '/apps')).json()
-  return `Connected: ${apps.length} application${apps.length === 1 ? '' : 's'}${meta.authRequired ? ', token accepted' : ', no token needed'}.`
+  const runs = meta.environment ? `runs ${String(meta.environment).replace('/', ' · ')} only` : 'runs any environment'
+  return { message: `Connected: ${runs}, ${apps.length} application${apps.length === 1 ? '' : 's'}${meta.authRequired ? ', token accepted' : ', no token needed'}.`, environment: meta.environment || undefined }
 }
 
-const e = encodeURIComponent
+/**
+ * Copies from the connected backend to another one. Only applications and
+ * scenarios travel: auth, certificates and secrets stay where they are, and
+ * the answer lists what the other backend still has to set up ("missing").
+ */
+export const copy = {
+  /** replace: update the application if the other backend already has it. */
+  async app(target: Backend, appId: string, replace = false): Promise<{ id: string; missing: string[] }> {
+    const zip = await (await send(current, 'GET', `/apps/${e(appId)}/export?global=false`)).arrayBuffer()
+    const res = await (await send(target, 'POST', `/import?replace=${replace}`, zip)).json()
+    return { id: res.id, missing: res.missing || [] }
+  },
+  async scenario(target: Backend, appId: string, scenarioId: string, overwrite = false): Promise<{ scenario: string; missing: string[] }> {
+    const yaml = await (await send(current, 'GET', `/apps/${e(appId)}/scenarios/${e(scenarioId)}/yaml`)).text()
+    const res = await (await send(target, 'POST', `/apps/${e(appId)}/scenarios/import?overwrite=${overwrite}`, yaml)).json()
+    return { scenario: res.scenario, missing: res.missing || [] }
+  },
+}
+
 
 export const api = {
   apps: () => call<Application[]>('GET', '/apps'),
